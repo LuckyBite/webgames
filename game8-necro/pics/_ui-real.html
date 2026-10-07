@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<meta charset="utf-8">
+<title>Некро · примерка интерфейса</title>
+<!-- Черновик: настоящие кадры боя (_bg-land.png 1280×720, _bg-port.png 390×844) и поверх
+     интерфейс трёх стилей по реальной раскладке игры. Не часть игры. -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Pixelify+Sans:wght@400;600;700&family=Cormorant+SC:wght@500;700&family=Tiny5&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="_ui-themes.css">
+<style>
+  .tabs { display: flex; gap: 6px; padding: 10px 18px 0; }
+  .tabs button { background: #14100f; color: #c9c2b4; border: 1px solid #3a2e2b; border-radius: 4px 4px 0 0; padding: 7px 16px; cursor: pointer; font: 600 14px system-ui; }
+  .tabs button.on { background: #1e3a2a; color: #8dffb0; border-color: #3f8f5c; }
+  .stage { display: flex; gap: 18px; padding: 14px 18px 30px; align-items: flex-start; flex-wrap: wrap; }
+  .fr { position: relative; overflow: hidden; background: #000 center / 100% 100% no-repeat; image-rendering: pixelated; flex: 0 0 auto; box-shadow: 0 0 0 1px #2a2220; }
+  .land { width: 1280px; height: 720px; background-image: url(_bg-land.png); }
+  .port { width: 390px; height: 844px; background-image: url(_bg-port.png); }
+  .scaler { transform-origin: 0 0; }
+  .fr .ui { position: absolute; inset: 0; display: block; }
+  .fr .hud { position: absolute; left: 0; right: 0; top: 0; height: 46px; box-sizing: border-box; }
+  .fr .banner { position: absolute; left: 50%; transform: translateX(-50%); white-space: nowrap; }
+  /* Альбом: правая колонка как в игре, чуть шире нынешних 218 px */
+  .land .col-r { position: absolute; right: 0; top: 46px; bottom: 0; width: 250px; display: flex; flex-direction: column; gap: 6px; padding: 6px; box-sizing: border-box; }
+  .land .banner { top: 120px; margin-left: -125px; }
+  .land .slot img { width: 52px; height: 52px; }
+  .land .spell img { width: 34px; height: 34px; }
+  .land .sock { width: 40px; height: 40px; } .land .sock img { width: 32px; height: 32px; }
+  .land .pile img { width: 28px; height: 28px; }
+  /* Портрет: нижняя панель — армия и заклинания, ритуал открывается кнопкой */
+  .port .banner { top: 300px; font-size: 12px; white-space: normal; width: 300px; }
+  .port .col-b { position: absolute; left: 0; right: 0; bottom: 0; padding: 6px; display: flex; flex-direction: column; gap: 6px; box-sizing: border-box; }
+  .port .army { grid-template-columns: repeat(4, 1fr); }
+  .port .blk { padding: 5px; } .port .blk h3 { display: none; }
+  .port .slot { aspect-ratio: auto; height: 66px; }
+  .port .spell { padding: 3px 2px; } .port .spell span { font-size: 10px; } .port .spell .cdn { top: 7px; }
+  .port .slot img { width: 58px; height: 58px; }
+  .port .spells { grid-template-columns: repeat(3, 1fr) 0.8fr; }
+  .port .spell img { width: 32px; height: 32px; }
+  .port .hud .res img { width: 16px; height: 16px; }
+  .port .hud .tier { font-size: 12px; }
+  .port .hud .bust { width: 34px; height: 34px; }
+  .lab { color: #8a8070; font-size: 12px; margin: 0 0 4px; }
+</style>
+<header>
+  <h1>Примерка интерфейса на настоящем кадре</h1>
+  <div class="sub">Фон — снимок боя из игры, без перерисовки. Интерфейс сверху положен по той же раскладке, что в игре: в альбоме колонка справа, в портрете панель снизу, ритуал за кнопкой.</div>
+</header>
+<div class="tabs" id="tabs"></div>
+<div class="stage">
+  <div><div class="lab">Альбом 1280×720 (показан в 70%)</div><div id="landBox"></div></div>
+  <div><div class="lab">Портрет 390×844</div><div id="portBox"></div></div>
+</div>
+
+<script>
+const G = 'https://raw.githubusercontent.com/crawl/crawl/master/crawl-ref/source/rltiles/';
+const ICON = {
+  bolt: G + 'gui/spells/necromancy/bolt_of_draining.png',
+  rise: G + 'gui/spells/necromancy/animate_dead.png',
+  frenzy: G + 'gui/spells/necromancy/death_channel.png',
+  bone: G + 'item/food/bone_humanoid1.png', rot: G + 'item/food/chunk_rotten.png',
+  soul: G + 'gui/invocations/yred_bind_soul.png', dust: G + 'gui/spells/monster/dream_dust.png',
+  lich: G + 'gui/spells/necromancy/necromutation.png', auto: G + 'gui/commands/autofight.png',
+  circle: G + 'misc/icons/demon_pentagram1.png',
+};
+const S = n => '../art/src/' + n + '.png';
+const SCH = ['bone', 'rot', 'soul', 'dust'];
+
+const hud = () => `
+  <div class="hud">
+    <img class="px bust" src="${S('dustling')}">
+    <div class="tier">Ярус 3 · 4/10
+      <div class="pips">${[1,1,1,1,0,0,0,0,0,2].map(v => `<i class="${v === 0 ? 'off' : v === 2 ? 'boss off' : ''}"></i>`).join('')}</div>
+    </div>
+    <div class="res">${SCH.map((s, i) => `<span><img class="px" src="${ICON[s]}">${[11,8,10,19][i]}</span>`).join('')}</div>
+  </div>`;
+const army = n => `<div class="blk"><h3>Армия</h3><div class="army">${
+  [['boneGolem',.9,'★★'],['reaper',.6,'★'],['lichling',.35,'★'],[null]].slice(0, n).map(([k, hp, st]) => k
+    ? `<div class="slot"><span class="st">${st}</span><img class="px" src="${S(k)}"><div class="hp"><b style="width:${hp*100}%"></b></div></div>`
+    : `<div class="slot" style="align-items:center;opacity:.5">+</div>`).join('')}</div></div>`;
+const spells = ritualBtn => `<div class="blk"><h3>Заклинания</h3><div class="spells">
+  <div class="spell ready"><img class="px" src="${ICON.bolt}"><span>Костяной шквал</span></div>
+  <div class="spell cd"><img class="px" src="${ICON.rise}"><b class="cdn">6</b><span>Восстать!</span></div>
+  <div class="spell cd"><img class="px" src="${ICON.frenzy}"><b class="cdn">🔒</b><span>Неистовство</span></div>
+  ${ritualBtn ? `<div class="spell"><img class="px" src="${ICON.circle}"><span>Ритуал</span></div>` : ''}
+</div></div>`;
+const ritual = () => `<div class="blk"><h3>Ритуальный круг</h3>
+  <div class="circle"><div class="sock"><img class="px" src="${ICON.bone}"></div><div class="sock"><img class="px" src="${ICON.bone}"></div><div class="sock"></div></div>
+  <div class="stock">${SCH.map((s, i) => `<div class="pile"><img class="px" src="${ICON[s]}"><div class="d"><span>${[8,8,8,18][i]}</span><span>◆${[2,0,1,0][i]}</span><span>✦${[0,0,0,1][i]}</span></div></div>`).join('')}</div>
+  <div class="row"><div class="btn"><img class="px" src="${ICON.auto}">Разложить</div><div class="btn">×10</div></div>
+  <div class="big">Поднять</div>
+  <div class="row"><div class="btn">Гримуар</div><div class="btn"><img class="px" src="${ICON.lich}">Лич</div></div>
+</div>`;
+
+function render(k) {
+  document.getElementById('landBox').innerHTML =
+    `<div style="width:${1280*.7}px;height:${720*.7}px"><div class="scaler" style="transform:scale(.7)"><div class="fr land"><div class="ui ${k}">
+      ${hud()}<div class="banner">Герои спускаются. Армия дерётся сама.</div>
+      <div class="col-r">${army(3)}${spells(false)}${ritual()}</div>
+    </div></div></div></div>`;
+  document.getElementById('portBox').innerHTML =
+    `<div class="fr port"><div class="ui ${k}">
+      ${hud()}<div class="banner">Герои спускаются. Армия дерётся сама.</div>
+      <div class="col-b">${army(4)}${spells(true)}</div>
+    </div></div>`;
+  document.querySelectorAll('#tabs button').forEach(b => b.classList.toggle('on', b.dataset.k === k));
+  try { localStorage.setItem('necro_ui_try', k); } catch {}
+}
+const names = { A: 'А · Каменная плита', B: 'Б · Тёмный гримуар', C: 'В · Рогалик DCSS', X: 'Сейчас в игре' };
+for (const k of ['A', 'B', 'C']) {
+  const b = document.createElement('button'); b.textContent = names[k]; b.dataset.k = k; b.onclick = () => render(k);
+  document.getElementById('tabs').append(b);
+}
+let start = 'A'; try { start = localStorage.getItem('necro_ui_try') || 'A'; } catch {}
+render(start);
+</script>

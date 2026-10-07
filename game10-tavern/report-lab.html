@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Стенд отчёта смены</title>
+<!-- Стенд report.js: стили берутся из <style> index.html, чтобы не держать две копии.
+     ?s=day|record|feast-ok|feast-fail|plain выбирает случай; без параметра — день. -->
+<style id="lab">
+  #lab-bar { position: fixed; top: 0; left: 0; right: 0; z-index: 10; display: flex; flex-wrap: wrap; gap: 4px; padding: 4px;
+    background: #000a; font: 12px system-ui; }
+  #lab-bar button { font: inherit; padding: 4px 8px; }
+  body.shot #lab-bar { display: none; }
+  #lab-log { position: fixed; bottom: 0; left: 0; z-index: 10; color: #9c9; font: 11px monospace; padding: 2px 4px; }
+  body.shot #lab-log { display: none; }
+</style>
+<script src="../shared/sfx.js"></script>
+</head>
+<body>
+<canvas id="game"></canvas>
+<div id="report" hidden></div>
+<div id="lab-bar"></div>
+<div id="lab-log"></div>
+<script type="module">
+  import { showReport } from './report.js';
+
+  const css = await fetch('./index.html').then(r => r.text());
+  const st = document.createElement('style');
+  st.textContent = css.match(/<style>([\s\S]*?)<\/style>/)[1];
+  document.head.insertBefore(st, document.getElementById('lab'));
+
+  // фон вместо зала: тёмное дерево и пятно очага
+  const cv = document.getElementById('game'), g = cv.getContext('2d');
+  cv.width = innerWidth; cv.height = innerHeight;
+  const grd = g.createRadialGradient(cv.width * 0.3, cv.height * 0.7, 10, cv.width * 0.3, cv.height * 0.7, cv.width);
+  grd.addColorStop(0, '#7a3a12'); grd.addColorStop(1, '#1a0f08');
+  g.fillStyle = grd; g.fillRect(0, 0, cv.width, cv.height);
+
+  const log = [];
+  window.soundLog = log;
+  const sound = (name, o) => {
+    log.push(name);
+    document.getElementById('lab-log').textContent = log.slice(-8).join(' ');
+    try { if (typeof SFX !== 'undefined') SFX.play(name, o); } catch (e) {}
+  };
+  const base = { served: 14, left: 2, coins: 824, tips: 96, autoCollected: 0, fame: 9, used: {}, fed: [], feast: null };
+  const CASES = {
+    day: () => [{ ...base }, { feast: null, wages: 90 }, {
+      stars: 2, best: 900, record: false, prev: 612, bank: 1534, fame: { now: 41, goal: 60 },
+      teaser: 'придёт новый гость с севера, хватает на жаркое и эль', line: 'Неплохо. Завтра ещё и стол у окна займём.', streakBest: 5, sound }],
+    record: () => [{ ...base, served: 18, left: 0, coins: 1210, tips: 180, autoCollected: 64, fame: 14 }, { feast: null, wages: 90 }, {
+      stars: 3, best: 980, record: true, prev: 980, bank: 2650, fame: { now: 62, goal: 60 },
+      teaser: 'пир в честь каравана', line: 'Вот это вечер! Даже очаг доволен.', streakBest: 9, sound }],
+    'feast-ok': () => [{ ...base, served: 20, left: 0, coins: 1400, tips: 210, fame: 22, fed: [], feast: { id: 'f1', guests: 22, goal: 18 } },
+      { feast: { ok: true, guests: 22, goal: 18, reward: { coins: 300, fame: 20 } }, wages: 120 }, {
+      stars: 3, best: 1210, record: true, prev: 1210, bank: 4100, fame: null, teaser: 'новая глава: дорога к перевалу', line: null, streakBest: 7, sound }],
+    'feast-fail': () => [{ ...base, served: 11, left: 9, coins: 640, tips: 40, fame: -6, feast: { id: 'f1', guests: 22, goal: 18 } },
+      { feast: { ok: false, guests: 22, goal: 18, hint: 'Гостей много, держи на плите сразу два котла.' }, wages: 120 }, {
+      stars: 1, best: 1210, record: false, prev: 900, bank: 1800, fame: { now: 60, goal: 60 },
+      teaser: 'пир ещё раз, гости потерпят дольше', line: null, streakBest: 2, sound }],
+    plain: () => [{ ...base }, { feast: null, wages: 0 }, undefined],
+  };
+
+  // реклама понарошку: через полсекунды «досмотрели»
+  const double = coins => (done, fail) => setTimeout(() => done(coins * 2), 500);
+  function run(key) {
+    const [sum, out, extra] = CASES[key]();
+    log.length = 0;
+    showReport(sum, () => { document.getElementById('report').hidden = true; log.push('next'); }, out, double(sum.coins), extra);
+  }
+  const bar = document.getElementById('lab-bar');
+  for (const k of Object.keys(CASES)) {
+    const b = document.createElement('button'); b.textContent = k; b.onclick = () => run(k); bar.append(b);
+  }
+  const q = new URLSearchParams(location.search);
+  if (q.has('shot')) document.body.classList.add('shot');
+  run(q.get('s') || 'day');
+  window.labRun = run;
+</script>
+</body>
+</html>

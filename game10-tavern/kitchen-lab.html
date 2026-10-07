@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Таверна — стенд кухни</title>
+<style>
+  body { margin: 0; background: #120b07; color: #d8c6a4; font: 13px system-ui; }
+  .row { display: flex; flex-wrap: wrap; gap: 14px; padding: 10px; align-items: flex-start; }
+  figure { margin: 0; } figcaption { padding: 4px 0; }
+  canvas { display: block; background: #000; }
+</style>
+</head>
+<body>
+<div class="row" id="root"></div>
+<script type="module">
+// Стенд кухни: фальшивое состояние смены в разных фазах, без main.js.
+// ?w=375&h=812 — размер кухни (по умолчанию портрет и альбом подряд); ?s=имя — одна сцена.
+// window.snapAll(dir) — снять все сцены в PNG через /upload (dpr 2, кадр в момент t).
+import { computeLayout } from './layout.js';
+import { Shift } from './shift.js';
+import { drawKitchen } from './kitchen.js';
+import { drawPlate } from './food.js';
+
+const P = new URLSearchParams(location.search);
+const PANTRY = ['bread', 'cheese', 'onion', 'meat', 'mushroom', 'honey', 'berries', 'pepper'];
+const SIZES = P.get('w') ? [[+P.get('w'), +P.get('h')]] : [[375, 812], [812, 375]];
+
+function cooker(s, i, item, t, extra = {}) { Object.assign(s.cookers[i], { item, t, ...extra }); }
+function seat(s, i, items) { s.seatGuest(i, { items }); s.takeOrder(i); }
+
+// Каждая сцена получает свежую смену и ui; t — время кадра (для анимаций по ui.anim).
+const SCENES = {
+  start(s, ui) {
+    seat(s, 0, ['bread_cheese']); seat(s, 1, ['ale', 'ribs']);
+  },
+  raw(s, ui, t) {
+    seat(s, 0, ['hunter_stew']); seat(s, 1, ['ale', 'cheese_honey']); seat(s, 2, [{ riddle: s.cfg.riddles ? 'sweet' : 'sweet' }]);
+    const h = s.cookTime('hearth') / 2;
+    cooker(s, 0, 'meat', h * 0.15); cooker(s, 1, 'meat', h * 0.85);
+    cooker(s, 2, 'mushroom', 1.2);
+    s.block = { item: 'onion', left: 2 }; s.cut.onion = 1; s.cut.bread = 4;
+    ui.anim.chop = t - 0.08;
+    s.barrel.pouring = true; s.barrel.fill = 0.55;
+    s.plate = ['bread', 'cheese']; s.plateQ = ['ok', 'ok'];
+  },
+  flip(s, ui, t) {
+    seat(s, 0, ['ribs', 'ale']); seat(s, 1, ['fire_roast']);
+    const h = s.cookTime('hearth') / 2;
+    cooker(s, 0, 'meat', h + 1); cooker(s, 1, 'meat', h + 0.4, { side: 1 });
+    ui.anim.flip = { 1: t - 0.15 };
+    cooker(s, 2, 'mushroom', s.cookTime('cauldron') * 0.5);
+    ui.stir = { slot: 2, angle: Math.PI * 1.2 };
+    s.block = { item: 'cheese', left: 1 }; s.cut.cheese = 2; s.cut.onion = 6; s.cut.bread = 0;
+    s.barrel.pouring = true; s.barrel.fill = 0.86;
+    s.plate = ['cheese', 'honey']; s.plateQ = ['ok', 'nice'];
+  },
+  ready(s, ui, t) {
+    seat(s, 0, ['honey_roast']); seat(s, 1, ['mushroom_soup', 'ale']); seat(s, 2, ['sandwich']);
+    const c = s.cookTime('hearth');
+    cooker(s, 0, 'meat', c * 0.75, { side: 1 }); cooker(s, 1, 'roast', c + 0.5, { side: 1 });
+    cooker(s, 2, 'broth', s.cookTime('cauldron') + 1, { stirred: true });
+    s.block = { item: 'bread', left: 3 };
+    s.cut.cheese = 3; s.cut.onion = 2; s.cut.bread = 1;
+    s.barrel.mug = 'full'; s.barrel.fill = 0.9;
+    s.plate = ['roast', 'pepper', 'onion']; s.plateQ = ['ok', 'nice', 'ok'];
+  },
+  burnt(s, ui, t) {
+    seat(s, 0, ['hunter_stew', 'ale']); seat(s, 2, ['bread_cheese']);
+    const c = s.cookTime('hearth');
+    cooker(s, 0, 'burnt', c * 2, { side: 1 }); cooker(s, 1, 'roast', c + s.readyTime('hearth') * 0.85, { side: 1 });
+    cooker(s, 2, 'mushroom', s.cookTime('cauldron') * 0.8, { scorched: true });
+    s.barrel.mug = 'spilled'; s.barrel.fill = 1;
+    s.cut.bread = 5; s.cut.onion = 3; s.cut.cheese = 6;
+    s.plate = ['broth', 'roast', 'onion', 'bread']; s.plateQ = ['scorched', 'ok', 'ok', 'ok'];
+  },
+  drag(s, ui, t) {
+    seat(s, 0, ['honey_bread']); seat(s, 1, ['cheese_honey']);
+    cooker(s, 2, 'mushroom', s.cookTime('cauldron') * 0.2);
+    s.barrel.pouring = true; s.barrel.by = 'staff'; s.barrel.fill = 0.4;
+    s.cut.bread = 2; s.cut.cheese = 2;
+    s.plate = ['bread', 'berries']; s.plateQ = ['ok', 'ok'];
+    ui.dragPreview = true;
+  },
+};
+
+function build(name, w, h, t) {
+  const s = new Shift({ seed: 7, autoArrive: false, setup: {
+    hearthSlots: 2, cauldronSlots: 1, seats: 3, riddles: true,
+    stock: { mushroom: 3, honey: 2, berries: 0, pepper: 1 },
+    staff: name === 'drag' ? { pour: 0.85, fire: 0.2 } : {},
+  } });
+  const L = computeLayout(w, h, { seats: 3, hearthSlots: 2, cauldronSlots: 1, pantry: PANTRY });
+  const ui = { anim: { chop: -9, flip: {}, stir: {} }, stir: null, drag: null, toast: null };
+  SCENES[name](s, ui, t);
+  if (ui.dragPreview) {
+    const p = L.kitchen.plate, y = p.y + p.h / 2;
+    const path = [];
+    for (let k = 0; k <= 12; k++) path.push([p.x - p.w * 0.1 + p.w * 1.1 * k / 12, y + Math.sin(k * 1.4) * p.h * 0.08]);
+    const [x, yy] = path[path.length - 1];
+    ui.drag = { source: { kind: 'pantry', id: 'honey' }, x, y: yy, path };
+  }
+  return { s, L, ui };
+}
+
+function render(ctx, name, w, h, t, dpr) {
+  const { s, L, ui } = build(name, w, h, t);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.fillStyle = '#1c120c'; ctx.fillRect(0, 0, w, h);
+  drawKitchen(ctx, L.kitchen, s, ui, t);
+  ctx.fillStyle = '#d8c6a4'; ctx.font = '600 14px system-ui'; ctx.fillText(name + ` ${w}×${h}`, 8, 26);
+}
+
+const names = P.get('s') ? [P.get('s')] : Object.keys(SCENES);
+const cells = [];
+const root = document.getElementById('root');
+for (const [w, h] of SIZES) for (const name of names) {
+  const fig = document.createElement('figure');
+  const cv = document.createElement('canvas'), dpr = Math.min(2, devicePixelRatio || 1);
+  cv.width = w * dpr; cv.height = h * dpr; cv.style.width = w + 'px'; cv.style.height = h + 'px';
+  fig.append(cv); root.append(fig);
+  cells.push({ ctx: cv.getContext('2d'), name, w, h, dpr });
+}
+let frozen = P.has('t') ? +P.get('t') : null;
+function frame(ms) {
+  const t = frozen ?? ms / 1000;
+  for (const c of cells) render(c.ctx, c.name, c.w, c.h, t, c.dpr);
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+window.snapAll = async (dir = '_kitchen_shots', t = 10.3) => {
+  const out = [];
+  for (const [w, h] of [[375, 812], [812, 375], [768, 1024], [1280, 720]]) for (const name of Object.keys(SCENES)) {
+    const cv = document.createElement('canvas'); cv.width = w * 2; cv.height = h * 2;
+    render(cv.getContext('2d'), name, w, h, t, 2);
+    const file = `${dir}/${name}-${w}x${h}.png`;
+    await fetch('/upload?file=' + encodeURIComponent(file), { method: 'POST', body: cv.toDataURL('image/png').split(',')[1] });
+    out.push(file);
+  }
+  return out;
+};
+window.snapOne = async (name, w, h, t = 10.3, file) => {
+  const cv = document.createElement('canvas'); cv.width = w * 2; cv.height = h * 2;
+  render(cv.getContext('2d'), name, w, h, t, 2);
+  file = file || `_kitchen_shots/${name}-${w}x${h}.png`;
+  await fetch('/upload?file=' + encodeURIComponent(file), { method: 'POST', body: cv.toDataURL('image/png').split(',')[1] });
+  return file;
+};
+</script>
+</body>
+</html>

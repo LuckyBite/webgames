@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<meta charset="utf-8">
+<title>Некро · сборка арта</title>
+<!--
+  Пакетная сборка импортного арта: art/casting.json + art/src/<роль>.png →
+  art/sprites-art.js (матрицы в формате sprites.js, палитра у каждого спрайта своя).
+
+  Палитра ОРИГИНАЛА — решение пользователя 2026-10-07: тайлы DCSS в рампы школ не
+  перекрашиваются. Поэтому конвертер делает только механику:
+    · альфа режется в 0/255 (порог 128), полупрозрачная тень под ногами уходит —
+      тень у юнита рисует движок, своя у тайла дала бы двойную;
+    · фигура опускается так, чтобы ноги стояли на нижней строке: биллборд ставится
+      низом на пол, и пустые строки снизу подвешивали бы юнита в воздухе;
+    · холст остаётся 32×32 у всех — так тайлы сохраняют относительный размер
+      (огр крупнее мелкого зомби), иначе нормализация высоты в render.js уравняла бы их.
+
+  Запуск: http://localhost:8781/game8-necro/tools/art-batch.html → «Собрать».
+  Результат не править руками: он перезаписывается при каждой сборке.
+-->
+<style>
+  body { margin: 0; background: #0a0810; color: #c9c2b4; font: 13px/1.4 system-ui, sans-serif; padding: 14px 18px; }
+  h1 { margin: 0 0 8px; font-size: 16px; color: #e6dcc0; }
+  button { background: #1e3a2a; color: #8dffb0; border: 1px solid #3f8f5c; border-radius: 4px; padding: 6px 14px; cursor: pointer; font: inherit; }
+  #log { white-space: pre-wrap; font: 12px monospace; margin-top: 10px; color: #9fb2c4; }
+  .grid { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+  .grid div { background: #241d1c; padding: 4px; text-align: center; font-size: 10px; color: #8a8070; }
+  .grid canvas { width: 96px; height: 96px; image-rendering: pixelated; display: block; }
+</style>
+<h1>Сборка импортного арта → art/sprites-art.js</h1>
+<button id="go">Собрать</button>
+<div id="log"></div>
+<div class="grid" id="grid"></div>
+
+<script type="module">
+const OUT = 'game8-necro/art/sprites-art.js';
+// Символы матрицы: '.' зарезервирована под прозрачность
+const CHARS = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!#$%&*+-/:;<=>?@^_~|';
+const log = t => { document.getElementById('log').textContent += t + '\n'; };
+const hex = (r, g, b) => '#' + [r, g, b].map(n => n.toString(16).padStart(2, '0')).join('');
+
+const load = src => new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = () => rej(src); i.src = src; });
+
+function convert(img) {
+  const w = img.width, h = img.height;
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  const x = c.getContext('2d'); x.drawImage(img, 0, 0);
+  const a = x.getImageData(0, 0, w, h).data;
+  const px = (i, j) => (j * w + i) * 4;
+  // Нижняя непрозрачная строка — по ней опускаем фигуру на пол
+  let bottom = -1;
+  for (let j = 0; j < h; j++) for (let i = 0; i < w; i++) if (a[px(i, j) + 3] >= 128) bottom = j;
+  const shift = h - 1 - bottom;
+  /* Тайлы с плавными переходами (жнец, голем, наёмник) несут 90–120 цветов, а
+     символов в матрице 82. Огрубляем каналы ступенями, пока не влезет: шаг 4–8
+     на глаз неотличим, а у остальных тайлов шаг остаётся 1, то есть они без потерь. */
+  let step = 1;
+  const q = v => Math.min(255, Math.round(v / step) * step);
+  const count = () => {
+    const s = new Set();
+    for (let i = 0; i < a.length; i += 4) if (a[i + 3] >= 128) s.add(hex(q(a[i]), q(a[i + 1]), q(a[i + 2])));
+    return s.size;
+  };
+  while (count() > CHARS.length) step += 1;
+  const colors = new Map();     // hex → символ
+  const rows = Array.from({ length: h }, () => Array(w).fill('.'));
+  let partial = 0;
+  for (let j = 0; j < h; j++) for (let i = 0; i < w; i++) {
+    const p = px(i, j), al = a[p + 3];
+    if (al > 0 && al < 255) partial++;
+    if (al < 128) continue;
+    const col = hex(q(a[p]), q(a[p + 1]), q(a[p + 2]));
+    if (!colors.has(col)) {
+      if (colors.size >= CHARS.length) throw new Error('цветов больше, чем символов: ' + CHARS.length);
+      colors.set(col, CHARS[colors.size]);
+    }
+    rows[j + shift][i] = colors.get(col);
+  }
+  const pal = Object.fromEntries([...colors].map(([col, ch]) => [ch, col]));
+  return { pal, rows: rows.map(r => r.join('')), colors: colors.size, partial, shift, step };
+}
+
+/* Исходник роли скачивается сам, если его нет или кастинг отдал роли другой тайл.
+   Какой тайл лежит в art/src, помнит art/src/_sources.json — без него смена тайла
+   в кастинге молча собирала бы старую картинку. */
+const DCSS = 'https://raw.githubusercontent.com/crawl/crawl/master/crawl-ref/source/rltiles/mon/';
+let sources = null;
+async function ensureSource(key, tile) {
+  if (!sources) {
+    try { const r = await fetch('../art/src/_sources.json', { cache: 'no-store' }); sources = r.ok ? await r.json() : {}; }
+    catch { sources = {}; }
+  }
+  const have = await fetch(`../art/src/${key}.png`, { method: 'HEAD', cache: 'no-store' }).then(r => r.ok, () => false);
+  if (have && (sources[key] === tile || !(key in sources))) { sources[key] ||= tile; return; }
+  const r = await fetch(DCSS + tile + '.png');
+  if (!r.ok) throw new Error('не скачался ' + tile + ': ' + r.status);
+  const bytes = new Uint8Array(await r.arrayBuffer());
+  let bin = ''; for (const b of bytes) bin += String.fromCharCode(b);
+  const up = await fetch('/upload?file=' + encodeURIComponent(`game8-necro/art/src/${key}.png`), { method: 'POST', body: btoa(bin) });
+  if (!up.ok) throw new Error('не записался art/src/' + key + '.png');
+  sources[key] = tile;
+  log(`${key}: скачан ${tile}`);
+}
+
+function preview(name, m) {
+  const c = document.createElement('canvas'); c.width = m.rows[0].length; c.height = m.rows.length;
+  const x = c.getContext('2d');
+  m.rows.forEach((r, j) => [...r].forEach((ch, i) => { if (m.pal[ch]) { x.fillStyle = m.pal[ch]; x.fillRect(i, j, 1, 1); } }));
+  const d = document.createElement('div'); d.append(c, name);
+  document.getElementById('grid').append(d);
+}
+
+document.getElementById('go').onclick = async () => {
+  document.getElementById('log').textContent = '';
+  document.getElementById('grid').innerHTML = '';
+  const cast = await (await fetch('../art/casting.json', { cache: 'no-store' })).json();
+  const out = {};
+  for (const [key, v] of Object.entries(cast)) {
+    if (!v.tile) { log(`${key}: тайл не выбран, пропуск`); continue; }
+    try {
+      await ensureSource(key, v.tile);
+      const img = await load(`../art/src/${key}.png?` + Date.now());
+      const m = convert(img);
+      out[key] = { src: v.tile, pal: m.pal, rows: m.rows };
+      log(`${key.padEnd(11)} ${v.tile.padEnd(38)} цветов ${String(m.colors).padStart(2)} · снято полупрозрачных ${m.partial} · опущен на ${m.shift}${m.step > 1 ? " · огрублено шагом " + m.step : ""}`);
+      preview(key, m);
+    } catch (e) { log(`${key}: ОШИБКА ${e.message || e}`); }
+  }
+  const body =
+`// СГЕНЕРИРОВАНО tools/art-batch.html из art/casting.json и art/src/*.png — руками не править.
+// Источник тайлов: Dungeon Crawl Stone Soup, rltiles/mon (public domain / CC0).
+// Палитра оригинальная, у каждого спрайта своя: решение 2026-10-07.
+// Собрано: ${new Date().toISOString()}
+
+export const ART = {
+${Object.entries(out).map(([k, m]) =>
+`  ${k}: { src: '${m.src}', pal: ${JSON.stringify(m.pal)}, rows: [
+${m.rows.map(r => '    ' + JSON.stringify(r) + ',').join('\n')}
+  ]},`).join('\n')}
+};
+`;
+  await fetch('/upload?file=' + encodeURIComponent('game8-necro/art/src/_sources.json'),
+    { method: 'POST', body: btoa(JSON.stringify(sources, null, 2)) });
+  const b64 = btoa(unescape(encodeURIComponent(body)));
+  const r = await fetch('/upload?file=' + encodeURIComponent(OUT), { method: 'POST', body: b64 });
+  log(r.ok ? `\nзаписано ${OUT}: ${Object.keys(out).length} спрайтов, ${(body.length / 1024).toFixed(1)} КБ` : `\nошибка записи ${r.status}`);
+  window.__batch = { ok: r.ok, count: Object.keys(out).length };
+};
+</script>

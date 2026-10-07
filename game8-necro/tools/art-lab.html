@@ -1,0 +1,422 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Art Lab — PNG в матрицу</title>
+<style>
+  :root { --bg:#14121a; --pnl:#1e1b26; --ln:#332e40; --tx:#e8e3f0; --dim:#8f86a3; --acc:#ffd166; --ok:#7bd88f; --bad:#e0797d; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--tx); font:14px/1.45 ui-monospace,Consolas,monospace; padding:16px 16px 60px; }
+  h1 { font-size:16px; margin:0 0 4px; letter-spacing:.5px; }
+  .sub { color:var(--dim); font-size:12px; margin-bottom:14px; max-width:82ch; }
+  .bar { display:flex; gap:14px; align-items:center; flex-wrap:wrap;
+         border:1px solid var(--ln); border-radius:8px; padding:10px 12px; background:var(--pnl); margin-bottom:12px; }
+  label { color:var(--dim); font-size:12px; display:flex; gap:6px; align-items:center; }
+  input[type=number] { width:58px; }
+  input, select, button { background:#2a2536; color:var(--tx); border:1px solid var(--ln); border-radius:6px; padding:6px 8px; font:inherit; font-size:13px; }
+  button { cursor:pointer; }
+  button:hover { background:#3a3350; border-color:#5a5075; }
+  button.go { background:var(--ok); color:#14121a; border-color:var(--ok); font-weight:bold; }
+  #drop { border:2px dashed var(--ln); border-radius:10px; padding:24px; text-align:center; color:var(--dim); margin-bottom:12px; }
+  #drop.hot { border-color:var(--acc); color:var(--acc); }
+  .cols { display:flex; gap:14px; flex-wrap:wrap; align-items:flex-start; }
+  .card { border:1px solid var(--ln); border-radius:8px; padding:10px 12px; background:var(--pnl); }
+  .card > b { display:block; font-size:11px; letter-spacing:1.4px; text-transform:uppercase; color:var(--acc); margin-bottom:8px; }
+  canvas { image-rendering:pixelated; display:block; background:#0a0810; border:1px solid var(--ln); max-width:100%; }
+  textarea { width:100%; min-height:240px; background:#0f0d14; color:var(--tx); border:1px solid var(--ln);
+             border-radius:6px; padding:9px; font:inherit; font-size:12px; white-space:pre; }
+  .verdict div { padding:2px 0; font-size:12.5px; }
+  .ok::before { content:'\2713  '; color:var(--ok); }
+  .bad::before { content:'\2717  '; color:var(--bad); }
+  .warn::before { content:'!  '; color:var(--acc); }
+  .swatch { display:inline-flex; align-items:center; gap:5px; margin:2px 8px 2px 0; font-size:11.5px; color:var(--dim); }
+  .swatch i { width:12px; height:12px; border:1px solid #000; display:inline-block; }
+  .note { color:var(--dim); font-size:11.5px; margin-top:8px; max-width:74ch; }
+</style>
+</head>
+<body>
+<h1>Art Lab · PNG → матрица</h1>
+<div class="sub">
+  Одна дверь для любого арта: генерация, PixelLab, рисование руками. Инструмент приводит картинку
+  к целевому размеру, прибивает цвета к <b>закрытой палитре игры</b>, режет альфу на 0/255 и отдаёт
+  готовую матрицу для <code>sprites.js</code>. Канон соблюдает КОД, а не генератор — поэтому
+  «нарисовано крупно и уменьшено» перестаёт быть приговором.
+</div>
+
+<div id="drop">перетащи PNG сюда · или <input type="file" id="file" accept="image/png,image/*"></div>
+
+<div class="bar">
+  <label>цель <input type="number" id="tw" value="24"> × <input type="number" id="th" value="32"></label>
+  <label>кадров <input type="number" id="frames" value="1" min="1" max="12"></label>
+  <label>палитра
+    <select id="pal">
+      <option value="bone">кость (нежить)</option>
+      <option value="rot">плоть (нежить)</option>
+      <option value="soul">душа (нежить)</option>
+      <option value="dust">прах (нежить)</option>
+      <option value="cold">холодная сталь (герои)</option>
+      <option value="necro">некромант (портрет)</option>
+      <option value="all">вся палитра игры</option>
+    </select>
+  </label>
+  <label>сжатие
+    <select id="mode">
+      <option value="area">среднее по клетке</option>
+      <option value="nearest">ближайший пиксель</option>
+    </select>
+  </label>
+  <label>цвет
+    <select id="cmode">
+      <option value="ramp">по яркости в рампу</option>
+      <option value="near">ближайший из палитры</option>
+    </select>
+  </label>
+  <label>свет <input type="range" id="light" min="-0.4" max="0.4" step="0.02" value="0.22"></label>
+  <label>контраст <input type="range" id="contrast" min="0.6" max="1.8" step="0.05" value="1.35"></label>
+  <label>обрезать поля <input type="checkbox" id="trim" checked></label>
+  <label>порог альфы <input type="number" id="athr" value="128" min="1" max="254"></label>
+  <label>контур <input type="checkbox" id="outline"></label>
+  <button class="go" id="run">Пересобрать</button>
+</div>
+
+<div class="cols">
+  <div class="card"><b>исходник</b><canvas id="src" width="240" height="240"></canvas>
+    <div class="note" id="srcinfo">—</div></div>
+  <div class="card"><b>результат ×8</b><canvas id="out" width="192" height="256"></canvas></div>
+  <div class="card"><b>в сцене</b><canvas id="scene" width="192" height="256"></canvas>
+    <div class="note">тёмный камень и факел, как в игре</div></div>
+  <div class="card"><b>силуэт</b><canvas id="sil" width="192" height="256"></canvas>
+    <div class="note">залит чёрным — виды обязаны отличаться</div></div>
+  <div class="card verdict" style="min-width:300px"><b>приёмка</b><div id="verdict">—</div>
+    <div id="colors" style="margin-top:8px"></div></div>
+</div>
+
+<div class="card" style="margin-top:14px">
+  <b>матрица для sprites.js</b>
+  <textarea id="code" spellcheck="false">—</textarea>
+  <div class="note">Скопировать целиком в <code>MATRICES</code>. Буквы палитры назначены автоматически;
+    если запись для этого вида уже есть — заменить её.</div>
+</div>
+
+<script type="module">
+import { STONE, COLD, NECRO, FIRE, BLOOD, SCHOOL_RAMP, OUTLINE } from '../palette.js';
+
+/* Наборы под квантование. Ключевое решение: набор УЗКИЙ — только то, что этому виду
+   разрешено тезисом. Широкая палитра пускает в спрайт чужие тона, и генерация начинает
+   протаскивать тёплую кожу в холодных героев или зелень в кость. */
+const EYE = NECRO[2];
+const SETS = {
+  bone:  [...SCHOOL_RAMP.bone, EYE, STONE[3], OUTLINE],
+  rot:   [...SCHOOL_RAMP.rot,  EYE, STONE[3], OUTLINE],
+  soul:  [...SCHOOL_RAMP.soul, EYE, STONE[3], OUTLINE],
+  dust:  [...SCHOOL_RAMP.dust, EYE, STONE[3], OUTLINE],
+  cold:  [...COLD, OUTLINE],
+  necro: [...SCHOOL_RAMP.dust, ...NECRO, STONE[0], STONE[3], OUTLINE],
+  all:   [...STONE, ...COLD, ...NECRO, ...FIRE, ...BLOOD,
+          ...SCHOOL_RAMP.bone, ...SCHOOL_RAMP.rot, ...SCHOOL_RAMP.soul, ...SCHOOL_RAMP.dust],
+};
+/* Рампы «от тёмного к светлому» под режим по яркости. Это главный инструмент стиля:
+   генерация приносит СВОЮ освещённость, а игре нужна её собственная рампа целиком —
+   иначе фигура садится в две средние ступени и читается грязным пятном. */
+const RAMPS = {
+  bone:  [OUTLINE, ...SCHOOL_RAMP.bone],
+  rot:   [OUTLINE, ...SCHOOL_RAMP.rot],
+  soul:  [OUTLINE, ...SCHOOL_RAMP.soul],
+  dust:  [OUTLINE, ...SCHOOL_RAMP.dust],
+  cold:  [OUTLINE, ...COLD],
+  necro: [OUTLINE, SCHOOL_RAMP.dust[0], SCHOOL_RAMP.dust[1], NECRO[1], SCHOOL_RAMP.dust[2], NECRO[2]],
+  all:   [OUTLINE, ...STONE.slice(1), ...SCHOOL_RAMP.bone],
+};
+const luma = (r, g, b) => (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+const uniq = a => [...new Set(a)];
+const rgb = h => [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16), parseInt(h.slice(5, 7), 16)];
+
+/* Буквы матрицы: мнемоника, а не порядковый номер — в sprites.js их читают глазами.
+   Точка занята прозрачностью, поэтому в набор не входит. */
+const LETTERS = 'wWgbdcshtpoklmrvyauqnefij'.split('');
+
+let img = null;
+const $ = id => document.getElementById(id);
+
+/* Расстояние во взвешенном RGB. Полноценный OkLab здесь не окупается: наборы узкие,
+   ступени рампы разнесены далеко, и порядок ближайших от смены метрики не меняется. */
+function nearestColor(set, r, g, b) {
+  let best = set[0], bd = Infinity;
+  for (const c of set) {
+    const dr = r - c.rgb[0], dg = g - c.rgb[1], db = b - c.rgb[2];
+    const d = 2 * dr * dr + 4 * dg * dg + 3 * db * db;
+    if (d < bd) { bd = d; best = c; }
+  }
+  return best;
+}
+
+function loadFile(f) {
+  const url = URL.createObjectURL(f);
+  const im = new Image();
+  im.onload = () => { img = im; URL.revokeObjectURL(url); run(); };
+  im.src = url;
+}
+
+$('file').addEventListener('change', e => { if (e.target.files[0]) loadFile(e.target.files[0]); });
+const drop = $('drop');
+drop.addEventListener('dragover', e => { e.preventDefault(); drop.classList.add('hot'); });
+drop.addEventListener('dragleave', () => drop.classList.remove('hot'));
+drop.addEventListener('drop', e => {
+  e.preventDefault(); drop.classList.remove('hot');
+  const f = e.dataTransfer.files[0];
+  if (f) loadFile(f);
+});
+$('run').addEventListener('click', () => img && run());
+for (const id of ['light', 'contrast', 'cmode', 'pal', 'mode', 'trim', 'outline', 'tw', 'th', 'frames', 'athr']) {
+  $(id).addEventListener('input', () => img && run());
+}
+
+// Отладочный вход: art-lab открывается и программно, чтобы гонять проверки без мыши
+window.__artlab = { loadUrl(u) { const im = new Image(); im.onload = () => { img = im; run(); }; im.src = u; },
+                    set(id, v) { $(id).value = v; }, run: () => run(), code: () => $('code').value,
+                    verdict: () => $('verdict').textContent };
+
+function run() {
+  const TW = +$('tw').value, TH = +$('th').value, FR = +$('frames').value;
+  const ATHR = +$('athr').value;
+  const area = $('mode').value === 'area';
+  const palKey = $('pal').value;
+  const set = uniq(SETS[palKey]).map(h => ({ hex: h, rgb: rgb(h) }));
+  const tone = { ramp: $('cmode').value === 'ramp', steps: RAMPS[palKey],
+                 light: +$('light').value, contrast: +$('contrast').value };
+
+  const sc = document.createElement('canvas');
+  sc.width = img.width; sc.height = img.height;
+  const sx = sc.getContext('2d', { willReadFrequently: true });
+  sx.drawImage(img, 0, 0);
+  const src = sx.getImageData(0, 0, img.width, img.height);
+  $('srcinfo').textContent = img.width + '×' + img.height + ' px · кадр ' + Math.round(img.width / FR) + ' px шириной';
+
+  const pv = $('src');
+  pv.width = 240; pv.height = Math.max(1, Math.round(240 * img.height / img.width));
+  const px = pv.getContext('2d');
+  px.imageSmoothingEnabled = false;
+  px.clearRect(0, 0, pv.width, pv.height);
+  px.drawImage(img, 0, 0, pv.width, pv.height);
+
+  const frames = [];
+  const fw = img.width / FR;
+  for (let f = 0; f < FR; f++) frames.push(shrink(src, f * fw, fw, TW, TH, ATHR, area, set, tone));
+
+  draw(frames, TW, TH);
+  emit(frames, TW, TH);
+  judge(frames, TW, TH, set, src);
+}
+
+/* Сжатие одного кадра. Порядок важен: сначала bbox по альфе (чтобы фигура заняла кадр
+   целиком), потом усреднение по клетке, и только в конце квантование — квантовать до
+   усреднения значит смешивать уже прибитые цвета и получать грязь мимо палитры. */
+function shrink(src, x0, fw, TW, TH, ATHR, area, set, tone) {
+  const W = src.width, H = src.height, d = src.data;
+  const xa = Math.floor(x0), xb = Math.min(W, Math.floor(x0 + fw));
+  let minX = 1e9, minY = 1e9, maxX = -1, maxY = -1;
+  for (let y = 0; y < H; y++) for (let x = xa; x < xb; x++) {
+    if (d[(y * W + x) * 4 + 3] >= ATHR) {
+      if (x < minX) minX = x;
+      if (x > maxX) maxX = x;
+      if (y < minY) minY = y;
+      if (y > maxY) maxY = y;
+    }
+  }
+  if (maxX < 0 || !$('trim').checked) { minX = xa; maxX = xb - 1; minY = 0; maxY = H - 1; }
+
+  const bw = maxX - minX + 1, bh = maxY - minY + 1;
+  /* Пропорции держим: фигуру нельзя растягивать под клетку, иначе она становится то
+     толстой, то узкой между кадрами. Лишнее добираем прозрачностью, фигуру ставим
+     по низу и по центру — так стоят все матрицы в игре. */
+  const k = Math.min(TW / bw, TH / bh);
+  const dw = Math.max(1, Math.round(bw * k)), dh = Math.max(1, Math.round(bh * k));
+  const offX = Math.floor((TW - dw) / 2), offY = TH - dh;
+
+  const grid = [];
+  for (let y = 0; y < TH; y++) grid.push(new Array(TW).fill(null));
+
+  for (let ty = 0; ty < dh; ty++) for (let tx = 0; tx < dw; tx++) {
+    const fx0 = minX + tx * bw / dw, fx1 = minX + (tx + 1) * bw / dw;
+    const fy0 = minY + ty * bh / dh, fy1 = minY + (ty + 1) * bh / dh;
+    let r = 0, g = 0, b = 0, n = 0, solid = 0;
+    if (area) {
+      const yEnd = Math.max(Math.floor(fy0) + 1, Math.ceil(fy1));
+      const xEnd = Math.max(Math.floor(fx0) + 1, Math.ceil(fx1));
+      for (let y = Math.floor(fy0); y < Math.min(H, yEnd); y++)
+        for (let x = Math.floor(fx0); x < Math.min(W, xEnd); x++) {
+          const o = (y * W + x) * 4;
+          n++;
+          if (d[o + 3] >= ATHR) { solid++; r += d[o]; g += d[o + 1]; b += d[o + 2]; }
+        }
+      if (!solid || solid * 2 < n) continue;              // клетка больше пустая, чем полная
+      r /= solid; g /= solid; b /= solid;
+    } else {
+      const x = Math.min(W - 1, Math.round((fx0 + fx1) / 2));
+      const y = Math.min(H - 1, Math.round((fy0 + fy1) / 2));
+      const o = (y * W + x) * 4;
+      if (d[o + 3] < ATHR) continue;
+      r = d[o]; g = d[o + 1]; b = d[o + 2];
+    }
+    grid[offY + ty][offX + tx] = [r, g, b];
+  }
+
+  paint(grid, TW, TH, set, tone);
+  if ($('outline').checked) addOutline(grid, TW, TH);
+  return grid;
+}
+
+/* Раскраска кадра. В режиме «по яркости» светлота клеток НОРМАЛИЗУЕТСЯ по самому кадру
+   и раскладывается по ступеням рампы игры — это и переводит чужой арт в наш стиль.
+   Режим «ближайший» оставлен для арта, который уже нарисован в нашей палитре. */
+function paint(grid, TW, TH, set, tone) {
+  const cells = [];
+  for (let y = 0; y < TH; y++) for (let x = 0; x < TW; x++) if (grid[y][x]) cells.push([x, y]);
+  if (!cells.length) return;
+
+  if (!tone.ramp) {
+    for (const [x, y] of cells) {
+      const [r, g, b] = grid[y][x];
+      grid[y][x] = nearestColor(set, r, g, b).hex;
+    }
+    return;
+  }
+
+  let lo = 1, hi = 0;
+  for (const [x, y] of cells) {
+    const l = luma(...grid[y][x]);
+    if (l < lo) lo = l;
+    if (l > hi) hi = l;
+  }
+  const span = Math.max(0.05, hi - lo);
+  const steps = tone.steps;
+  for (const [x, y] of cells) {
+    let t = (luma(...grid[y][x]) - lo) / span;          // 0..1 внутри самого кадра
+    t = (t - 0.5) * tone.contrast + 0.5 + tone.light;
+    const i = Math.max(0, Math.min(steps.length - 1, Math.round(t * (steps.length - 1))));
+    grid[y][x] = steps[i];
+  }
+}
+
+// Автоконтур по внешнему краю. Внутренние разделения силуэта им не заменить —
+// их рисует человек, и ART.md на этом настаивает.
+function addOutline(grid, TW, TH) {
+  const solid = (x, y) => x >= 0 && y >= 0 && x < TW && y < TH && grid[y][x];
+  const add = [];
+  for (let y = 0; y < TH; y++) for (let x = 0; x < TW; x++) {
+    if (grid[y][x]) continue;
+    if (solid(x + 1, y) || solid(x - 1, y) || solid(x, y + 1) || solid(x, y - 1)) add.push([x, y]);
+  }
+  for (const [x, y] of add) grid[y][x] = OUTLINE;
+}
+
+function draw(frames, TW, TH) {
+  const S = 8, W = TW * S * frames.length, H = TH * S;
+  for (const [id, kind] of [['out', 'plain'], ['scene', 'scene'], ['sil', 'sil']]) {
+    const c = $(id);
+    c.width = W; c.height = H;
+    const x = c.getContext('2d');
+    x.imageSmoothingEnabled = false;
+    if (kind === 'scene') {
+      x.fillStyle = STONE[1];
+      x.fillRect(0, 0, W, H);
+      const g = x.createRadialGradient(W / 2, H * 0.3, 4, W / 2, H * 0.3, H * 0.85);
+      g.addColorStop(0, 'rgba(255,180,84,0.45)');
+      g.addColorStop(1, 'rgba(10,8,16,0.92)');
+      x.fillStyle = g;
+      x.fillRect(0, 0, W, H);
+    } else {
+      x.fillStyle = kind === 'sil' ? '#cfc7bb' : '#0a0810';
+      x.fillRect(0, 0, W, H);
+    }
+    frames.forEach((grid, f) => {
+      for (let y = 0; y < TH; y++) for (let tx = 0; tx < TW; tx++) {
+        const col = grid[y][tx];
+        if (!col) continue;
+        x.fillStyle = kind === 'sil' ? '#000000' : col;
+        x.fillRect((f * TW + tx) * S, y * S, S, S);
+      }
+    });
+  }
+}
+
+function emit(frames, TW, TH) {
+  const used = new Map();                       // hex → буква
+  for (const grid of frames) for (const row of grid) for (const c of row) {
+    if (c && !used.has(c)) used.set(c, LETTERS[used.size % LETTERS.length]);
+  }
+  const pal = [...used].map(([hex, l]) => '    ' + l + ": '" + hex + "',").join('\n');
+  const rows = frames.map(grid =>
+    grid.map(row => "      '" + row.map(c => (c ? used.get(c) : '.')).join('') + "',").join('\n')
+  ).join('\n      // ── следующий кадр ──\n');
+
+  $('code').value =
+    '  имяВида: {\n' +
+    '    pal: {\n' + pal + '\n    },\n' +
+    '    rows: [\n' + rows + '\n    ],\n' +
+    '  },\n\n' +
+    '// цвета из palette.js: ' + [...used.keys()].join(' ') + '\n' +
+    '// кадров: ' + frames.length + ' · размер ' + TW + '×' + TH;
+
+  $('colors').innerHTML = [...used].map(([hex, l]) =>
+    '<span class="swatch"><i style="background:' + hex + '"></i>' + l + ' ' + hex + '</span>').join('');
+}
+
+function judge(frames, TW, TH, set, src) {
+  const v = [];
+  const allowed = new Set(set.map(s => s.hex));
+  const used = new Set();
+  let filled = 0, outlinePx = 0;
+  for (const grid of frames) for (const row of grid) for (const c of row) {
+    if (!c) continue;
+    filled++;
+    used.add(c);
+    if (c === OUTLINE) outlinePx++;
+  }
+  const total = TW * TH * frames.length;
+
+  v.push(['ok', 'размер ' + TW + '×' + TH + ', кадров ' + frames.length]);
+  v.push([[...used].every(c => allowed.has(c)) ? 'ok' : 'bad',
+          'цветов ' + used.size + ', все из палитры игры']);
+  v.push(['ok', 'альфа только 0/255 — порог применён, полупрозрачных нет']);
+
+  const fill = filled / total;
+  v.push([fill > 0.12 && fill < 0.78 ? 'ok' : 'warn',
+          'заполнение кадра ' + Math.round(fill * 100) + '% (норма 12–78%)']);
+
+  // Проверка исходника: битая альфа — главный симптом «нарисовано крупно и уменьшено»
+  let semi = 0, opaque = 0;
+  for (let i = 3; i < src.data.length; i += 4) {
+    const a = src.data[i];
+    if (a === 255) opaque++;
+    else if (a > 0) semi++;
+  }
+  const semiShare = semi / (src.width * src.height);
+  v.push([semiShare < 0.02 ? 'ok' : 'warn',
+          'полупрозрачных в исходнике ' + (semiShare * 100).toFixed(1) + '%' +
+          (semiShare < 0.02 ? '' : ' — сглаженные края, конвертер срезал их по порогу')]);
+  v.push([opaque > 0 ? 'ok' : 'bad',
+          'непрозрачных пикселей в исходнике: ' + opaque.toLocaleString('ru')]);
+
+  if (frames.length > 1) {
+    const box = frames.map(g => {
+      let top = TH, bot = -1;
+      g.forEach((row, y) => { if (row.some(Boolean)) { if (y < top) top = y; if (y > bot) bot = y; } });
+      return bot - top + 1;
+    });
+    const spread = Math.max(...box) - Math.min(...box);
+    v.push([spread <= 1 ? 'ok' : 'bad',
+            'рост фигуры гуляет между кадрами на ' + spread + ' px (норма 0–1)']);
+  }
+
+  if (outlinePx) {
+    v.push([outlinePx > filled * 0.1 ? 'ok' : 'warn',
+            'контур занимает ' + Math.round(outlinePx / filled * 100) + '% фигуры']);
+  }
+
+  $('verdict').innerHTML = v.map(([k, t]) => '<div class="' + k + '">' + t + '</div>').join('');
+}
+</script>
+</body>
+</html>

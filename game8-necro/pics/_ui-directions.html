@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<meta charset="utf-8">
+<title>Некро · направления интерфейса</title>
+<!-- Черновик для выбора, не часть игры. Иконки — DCSS rltiles (public domain), хотлинком. -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Pixelify+Sans:wght@400;600;700&family=Cormorant+SC:wght@500;700&family=Tiny5&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="_ui-themes.css">
+<header>
+  <h1>Три направления интерфейса</h1>
+  <div class="sub">Одна и та же правая колонка (альбом) в трёх стилях: HUD, армия, заклинания, ритуальный круг, останки. Иконки и шрифты настоящие, спрайты твои. Портрет собирается из тех же деталей.</div>
+</header>
+<div class="wrap" id="wrap"></div>
+
+<script>
+const G = 'https://raw.githubusercontent.com/crawl/crawl/master/crawl-ref/source/rltiles/';
+const ICON = {
+  bolt: G + 'gui/spells/necromancy/bolt_of_draining.png',
+  rise: G + 'gui/spells/necromancy/animate_dead.png',
+  frenzy: G + 'gui/spells/necromancy/death_channel.png',
+  bone: G + 'item/food/bone_humanoid1.png',
+  rot: G + 'item/food/chunk_rotten.png',
+  soul: G + 'gui/invocations/yred_bind_soul.png',
+  dust: G + 'gui/spells/monster/dream_dust.png',
+  book: G + 'item/book/' + 'book_of_the_dead.png',
+  lich: G + 'gui/spells/necromancy/necromutation.png',
+  auto: G + 'gui/commands/autofight.png',
+};
+const S = n => '../art/src/' + n + '.png';
+
+const DIRS = [
+  ['A', 'А · Каменная плита', 'Diablo II: тёмный камень с фаской, бронза в заголовках, кнопки как вставленные плиты. Пиксельный шрифт Pixelify Sans. Самый «игровой», читается на любом экране.'],
+  ['B', 'Б · Тёмный гримуар', 'Darkest Dungeon: почти чёрные панели, тонкая золотая двойная рамка, гравюрный шрифт Cormorant SC. Самый атмосферный и «дорогой», мелкий текст читается хуже.'],
+  ['C', 'В · Рогалик DCSS', 'Как интерфейс самой Dungeon Crawl: чёрные плашки, серые линии, пиксельный Tiny5, всё на иконках. Самый родной для новых спрайтов, но аскетичный.'],
+];
+
+const ui = k => `
+<div class="ui ${k}">
+  <div class="hud">
+    <img class="px bust" src="${S('dustling')}">
+    <div class="tier">Ярус 3 · 4/10
+      <div class="pips">${[1,1,1,1,0,0,0,0,0,2].map(v => `<i class="${v === 0 ? 'off' : v === 2 ? 'boss off' : ''}"></i>`).join('')}</div>
+    </div>
+    <div class="res">${['bone','rot','soul','dust'].map((s, i) => `<span><img class="px" src="${ICON[s]}">${[11,8,10,19][i]}</span>`).join('')}</div>
+  </div>
+  <div class="banner">Герои спускаются. Армия дерётся сама.</div>
+  <div class="blk"><h3>Армия</h3>
+    <div class="army">${[['boneGolem',.9,'★★'],['reaper',.6,'★'],['lichling',.35,'★']].map(([n, hp, st]) =>
+      `<div class="slot"><span class="st">${st}</span><img class="px" src="${S(n)}"><div class="hp"><b style="width:${hp*100}%"></b></div></div>`).join('')}</div>
+  </div>
+  <div class="blk"><h3>Заклинания</h3>
+    <div class="spells">
+      <div class="spell ready"><img class="px" src="${ICON.bolt}"><span>Костяной шквал</span></div>
+      <div class="spell cd"><img class="px" src="${ICON.rise}"><b class="cdn">6</b><span>Восстать!</span></div>
+      <div class="spell cd"><img class="px" src="${ICON.frenzy}"><b class="cdn">🔒</b><span>Неистовство</span></div>
+    </div>
+  </div>
+  <div class="blk"><h3>Ритуальный круг</h3>
+    <div class="circle">
+      <div class="sock"><img class="px" src="${ICON.bone}"></div>
+      <div class="sock"><img class="px" src="${ICON.bone}"></div>
+      <div class="sock"></div>
+    </div>
+    <div class="stock">${['bone','rot','soul','dust'].map((s, i) => `<div class="pile"><img class="px" src="${ICON[s]}"><div class="d"><span>${[8,8,8,18][i]}</span><span>◆${[2,0,1,0][i]}</span><span>✦${[0,0,0,1][i]}</span></div></div>`).join('')}</div>
+    <div class="row"><div class="btn"><img class="px" src="${ICON.auto}">Разложить</div><div class="btn">Ритуал ×10</div></div>
+    <div class="big">Поднять</div>
+    <div class="row"><div class="btn"><img class="px" src="${ICON.book}">Гримуар</div><div class="btn"><img class="px" src="${ICON.lich}">Ритуал лича</div></div>
+  </div>
+</div>`;
+
+const wrap = document.getElementById('wrap');
+for (const [k, name, desc] of DIRS) {
+  const c = document.createElement('div'); c.className = 'col';
+  c.innerHTML = `<div class="cap">${name}<small>${desc}</small></div>` +
+    `<div class="scene">${['skeleton','plague','banshee','paladin','priest'].map((n, i) => `<img class="px" src="${S(n)}" style="left:${10 + i * 56}px">`).join('')}</div>` + ui(k);
+  wrap.append(c);
+}
+// Книга: если файла с таким именем нет, берём первую книгу из индекса
+fetch('../art/dcss-item-index.json').then(r => r.json()).then(list => {
+  const b = list.find(p => /book\/.*(necro|dead|death)/i.test(p)) || list.find(p => p.startsWith('item/book/'));
+  if (b) document.querySelectorAll(`img[src="${ICON.book}"]`).forEach(i => i.src = G + b);
+});
+</script>

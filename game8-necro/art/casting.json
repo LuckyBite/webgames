@@ -1,0 +1,112 @@
+{
+  "skeleton": {
+    "tile": "undead/draugr/draugr_humanoid_medium",
+    "ru": "Скелет",
+    "en": "Skeleton"
+  },
+  "boneArcher": {
+    "tile": "undead/skeletal_warrior",
+    "ru": "Скелет-броненосец",
+    "en": "Shield Skeleton"
+  },
+  "boneGuard": {
+    "tile": "vault/antique_champion",
+    "ru": "Скелет-жрец",
+    "en": "Aura Skeleton"
+  },
+  "boneGolem": {
+    "tile": "undead/revenant",
+    "ru": "Адский скелет",
+    "en": "Hell Skeleton"
+  },
+  "corpse": {
+    "tile": "undead/zombies/zombie_small",
+    "ru": "Ходячий труп",
+    "en": "Walking Corpse"
+  },
+  "plague": {
+    "tile": "undead/zombies/zombie_human",
+    "ru": "Чумной носитель",
+    "en": "Plague Bearer"
+  },
+  "brute": {
+    "tile": "undead/zombies/zombie_ogre",
+    "ru": "Гнилой громила",
+    "en": "Rotting Brute"
+  },
+  "meatHill": {
+    "tile": "undead/zombies/zombie_large",
+    "ru": "Мясная гора",
+    "en": "Hill of Flesh"
+  },
+  "shade": {
+    "tile": "undead/ghost",
+    "ru": "Тень",
+    "en": "Shade"
+  },
+  "banshee": {
+    "tile": "nonliving/shadows/shadow_poltergeist",
+    "ru": "Баньши",
+    "en": "Banshee"
+  },
+  "phantom": {
+    "tile": "undead/shadowghast",
+    "ru": "Фантом",
+    "en": "Phantom"
+  },
+  "reaper": {
+    "tile": "undead/shadow_wraith",
+    "ru": "Жнец",
+    "en": "Reaper"
+  },
+  "dustling": {
+    "tile": "humanoids/humans/necromancer",
+    "ru": "Прахолов",
+    "en": "Dustling"
+  },
+  "sorcerer": {
+    "tile": "undead/lich",
+    "ru": "Костяной колдун",
+    "en": "Bone Sorcerer"
+  },
+  "ghoul": {
+    "tile": "undead/ancient_lich",
+    "ru": "Некрофаг",
+    "en": "Ghoul"
+  },
+  "lichling": {
+    "tile": "undead/dread_lich",
+    "ru": "Лич-прислужник",
+    "en": "Lichling"
+  },
+  "militia": {
+    "tile": "humanoids/humans/human3",
+    "ru": "Ополченец",
+    "en": "Militiaman"
+  },
+  "mercenary": {
+    "tile": "unique/edmund",
+    "ru": "Наёмник",
+    "en": "Mercenary"
+  },
+  "archer": {
+    "tile": "humanoids/elves/deep_elf_archer",
+    "ru": "Лучник",
+    "en": "Archer"
+  },
+  "priest": {
+    "tile": "unique/mennas",
+    "ru": "Жрец",
+    "en": "Priest"
+  },
+  "mage": {
+    "tile": "humanoids/humans/servant_of_whispers",
+    "ru": "Маг",
+    "en": "Mage"
+  },
+  "paladin": {
+    "tile": "humanoids/humans/vault_warden",
+    "ru": "Паладин",
+    "en": "Paladin"
+  }
+}

@@ -1,0 +1,1258 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<title>Восход</title>
+<style>
+  html,body{margin:0;padding:0;height:100%;overflow:hidden;background:#050a1e;
+    -webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent;}
+  body{position:fixed;inset:0;touch-action:none;overscroll-behavior:none;}
+  canvas{display:block;width:100%;height:100%;}
+  /* Отладочная панель — только для просмотра арта, в релиз не идёт */
+  #dev{position:fixed;left:0;right:0;bottom:0;display:flex;gap:6px;align-items:center;
+    padding:8px 10px;font:12px/1 ui-monospace,Consolas,monospace;color:#cfe0ff;
+    background:rgba(4,8,22,.55);backdrop-filter:blur(6px);flex-wrap:wrap;}
+  #dev button{font:inherit;color:#cfe0ff;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.18);
+    border-radius:6px;padding:6px 9px;cursor:pointer;}
+  #dev button:hover{background:rgba(255,255,255,.18);}
+  #dev.hidden{display:none;}
+  #devtog{position:fixed;right:8px;bottom:8px;z-index:5;width:30px;height:30px;border-radius:8px;
+    border:1px solid rgba(255,255,255,.18);background:rgba(4,8,22,.5);color:#cfe0ff;
+    font:14px/1 system-ui;cursor:pointer;}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<button id="devtog" title="Отладка">⚙</button>
+<div id="dev"></div>
+
+<script src="../shared/sfx.js"></script>
+<script>
+/* если sfx.js не подгрузился (открыли файлом с диска) — игра не должна падать */
+if (typeof SFX === 'undefined') window.SFX = { play() {}, unlock() {}, setMuted() {},
+  music: { start() {}, set() {}, stop() {} }, amb: { start() {}, stop() {} } };
+(() => {
+'use strict';
+
+// ============================================================================
+//  «ВОСХОД», версия 3: колодец с характером.
+//  Дома стоят вплотную двумя стенами, между ними шахта. Паркурщик висит на
+//  выступе, пробел (или тап) — прыжок; в воздухе рулим влево-вправо и цепляемся
+//  за следующий выступ. Дуга прыжка не тронута с версии крыш (v1/).
+//
+//  Тезис арт-дирекции: вся картина выводится из ОДНОГО числа — высоты героя.
+//    Свет: одно солнце, и оно поднимается вместе с героем. Тень — силуэт без
+//          внутреннего рисунка, только контровой край.
+//    Палитра: семь опорных высот, между ними непрерывная интерполяция. Право на
+//          акцент — у кромки, за которую можно зацепиться, и только у неё. Второй,
+//          тёплый цвет — у всего, что город зажёг сам: окна и вывески.
+//    Заполнение: город. Внизу глухой колодец, выше он распадается на блоки.
+//    Движение покоя: вис покачивается, вымпелы и люльки, проблесковые огни, голуби.
+//  Сложность выводится из той же высоты: вид выступа, его ширина, повторы одной
+//  стены, пропуски, время осыпания и ветер зависят от высоты самого выступа.
+//  Ассетов нет, всё процедурное.
+// ============================================================================
+
+const cvs = document.getElementById('c');
+const ctx = cvs.getContext('2d', { alpha: false });
+
+// ---------------------------------------------------------------- константы
+const COL     = 400;    // ширина игровой колонки, мировых единиц (1 ед. ≈ 1 м)
+const HALF    = COL / 2;
+const MINVIEW = 700;    // минимум единиц по вертикали в кадре (держит альбомную)
+const WALL    = 118;    // внутренняя грань стены от центра шахты
+const LT      = 12;     // толщина выступа
+const HH = 52, HW = 24; // рост и ширина силуэта паркурщика
+const HANDY   = HH;     // высота хвата над стопами: за неё цепляемся
+
+const GRAV = 2250;      // ед/с²  ─┐ дуга прыжка не менялась с версии крыш:
+const JUMP = 935;       // ед/с   ─┤ апекс 194 ед., полёт 0.83 с,
+const ACC  = 2700, VMAX = 430;  // ─┘ по горизонтали за прыжок берётся до 357 ед.
+const KICK = 265;
+const AIRDRAG = 0.35;   // доля скорости по горизонтали, что остаётся через секунду       // толчок в сторону в момент отрыва
+const STEP = 88, JIT = 30, Y0 = 130;   // раскладка выступов
+
+// -------------------------------------------------------------------- сцена
+let W = 0, H = 0, scale = 1, viewU = 700, dpr = 1;
+let camY = 0, t = 0;
+
+// hang — индекс выступа, на котором висим, или -1 если в воздухе;
+// hx — где взялись относительно подвижного выступа (люлька уносит с собой)
+const hero = { x: 0, y: 0, vx: 0, vy: 0, prevY: 0, face: 1, hang: 0, catch: 0, hx: 0 };
+const trail = [], dust = [], chunks = [], birds = [];
+const broken = new Set(), crumble = new Map(), scattered = new Set();
+// ready — висим на первом выступе и ждём первого прыжка; play; over — сорвался
+let state = 'ready', overT = 0, lock = 0, best = 0, runMax = 0, fallAlt = 0, ambName = '', musicT = 0;
+try { best = Math.round(+localStorage.getItem('sunrise_best')) || 0; } catch (e) {}
+const S = (n, o) => { try { SFX.play(n, o); } catch (e) {} };
+
+// --------------------------------------------------------------- утилиты
+const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
+const lerp  = (a, b, k) => a + (b - a) * k;
+const smooth = k => k * k * (3 - 2 * k);
+// детерминированный хэш: сцена не «дрожит» при скролле и одинакова между сессиями
+function hash(n){ const x = Math.sin(n * 127.1 + 311.7) * 43758.5453; return x - Math.floor(x); }
+
+// ------------------------------------------------------------------ палитра
+// Семь опорных высот. Между ними цвета интерполируются непрерывно —
+// границ фаз игрок не замечает, только видит, что мир вокруг стал другим.
+const PHASES = [
+  { a:    0, sky:['#050a1e','#0d1234','#2a2450'], sil:'#02030a', acc:'#8ea2ff' }, // предрассветная тьма
+  { a:  600, sky:['#0d1440','#3a2a63','#8f4258'], sil:'#050512', acc:'#ff9c6a' }, // первый свет
+  { a: 1500, sky:['#1e3b86','#9a4f74','#ff8f4f'], sil:'#0a0814', acc:'#ffc178' }, // рассвет
+  { a: 2700, sky:['#2b6bc4','#82b6e2','#ffd9a4'], sil:'#101423', acc:'#fff1c8' }, // утро
+  { a: 4200, sky:['#1857b8','#6ea6e8','#e6f4ff'], sil:'#17202f', acc:'#ffffff' }, // над облаками
+  { a: 6200, sky:['#06133a','#124087','#6fb2e6'], sil:'#0e1729', acc:'#cfe8ff' }, // стратосфера
+  { a: 8600, sky:['#01020a','#04071a','#0a1130'], sil:'#04060f', acc:'#9fd6ff' }, // космос
+];
+const rgb = h => [parseInt(h.slice(1,3),16), parseInt(h.slice(3,5),16), parseInt(h.slice(5,7),16)];
+const PH_ = PHASES.map(p => ({ a:p.a, sky:p.sky.map(rgb), sil:rgb(p.sil), acc:rgb(p.acc) }));
+
+const PAL = { sky:[[0,0,0],[0,0,0],[0,0,0]], sil:[0,0,0], acc:[0,0,0], silCss:'#000', accCss:'#fff' };
+let lightK = 1;   // насколько горят окна: ночью и в стратосфере — да, днём — нет
+const css = c => `rgb(${c[0]|0},${c[1]|0},${c[2]|0})`;
+const sil = a => `rgba(${PAL.sil[0]|0},${PAL.sil[1]|0},${PAL.sil[2]|0},${a})`;
+const acc = a => `rgba(${PAL.acc[0]|0},${PAL.acc[1]|0},${PAL.acc[2]|0},${a})`;
+
+function updatePalette(alt){
+  let i = 0;
+  while (i < PH_.length - 2 && alt > PH_[i+1].a) i++;
+  const A = PH_[i], B = PH_[i+1];
+  const k = smooth(clamp((alt - A.a) / (B.a - A.a), 0, 1));
+  for (let s = 0; s < 3; s++)
+    for (let c = 0; c < 3; c++) PAL.sky[s][c] = lerp(A.sky[s][c], B.sky[s][c], k);
+  for (let c = 0; c < 3; c++){
+    PAL.sil[c] = lerp(A.sil[c], B.sil[c], k);
+    PAL.acc[c] = lerp(A.acc[c], B.acc[c], k);
+  }
+  PAL.silCss = css(PAL.sil);
+  PAL.accCss = css(PAL.acc);
+  lightK = Math.max(clamp((900 - alt) / 900, 0, 1), clamp((alt - 5200) / 2200, 0, 1));
+}
+
+// ------------------------------------------------------------------ камера
+// Мировая Y растёт вверх. camY — мировая Y нижней кромки экрана.
+// p — коэффициент параллакса: чем дальше слой, тем меньше p и тем медленнее он уходит.
+const sx = wx => W / 2 + wx * scale;
+const sy = (wy, p) => H - (wy - camY * (p === undefined ? 1 : p)) * scale;
+
+function resize(){
+  dpr = Math.min(window.devicePixelRatio || 1, 2);
+  W = Math.round(cvs.clientWidth  || window.innerWidth);
+  H = Math.round(cvs.clientHeight || window.innerHeight);
+  cvs.width  = Math.round(W * dpr);
+  cvs.height = Math.round(H * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  // Колонка обязана влезть по ширине, но по вертикали кадр не может быть уже MINVIEW.
+  // Портрет → колонка на всю ширину. Альбомная → колонка по центру, по бокам панорама.
+  scale = Math.min(W / COL, H / MINVIEW);
+  viewU = H / scale;
+}
+window.addEventListener('resize', resize);
+window.addEventListener('orientationchange', () => setTimeout(resize, 120));
+
+// ----------------------------------------------------------------- выступы
+// Генерация по индексу, без массивов: сцена бесконечна и воспроизводима.
+// Всё, что зависит от сложности, считается от высоты САМОГО выступа, а не героя:
+// выступ не меняет вид и ширину на глазах, пока игрок на него целится.
+const K = { CORN:0, BALC:1, AWN:2, CRUMB:3, GOND:4, SIGN:5, FLAG:6, SPIKE:7, VOID:8 };
+const ledgeY = i => Y0 + i * STEP + (hash(i * 1.37) - 0.5) * JIT;
+const tierOf = i => clamp((ledgeY(i) - 400) / 6500, 0, 1);
+// Стороны в основном чередуются, иначе выпадают серии по четыре подряд с одной
+// стены. С высотой повторов больше: прыжок «вверх и назад» требует стрелки.
+const ledgeSide = i => ((i + (hash(i * 3.71) < 0.26 + 0.16 * tierOf(i) ? 1 : 0)) % 2 ? 1 : -1);
+
+const kindMemo = new Map();
+function ledgeKind(i){
+  if (i < 0) return K.CORN;
+  if (kindMemo.has(i)) return kindMemo.get(i);
+  let k = i % 3 === 1 ? K.BALC : K.CORN;
+  if (i >= 6){                                   // первые шесть всегда простые
+    const tr = tierOf(i), r = hash(i * 9.37);
+    const w = [lerp(.40,.20,tr), lerp(.30,.08,tr), lerp(.08,.10,tr), lerp(.05,.20,tr),
+               lerp(.04,.14,tr), lerp(.08,.10,tr), lerp(.05,.08,tr), lerp(0,.07,tr), lerp(0,.07,tr)];
+    const sum = w.reduce((a, b) => a + b, 0);
+    let a = 0;
+    for (k = 0; k < w.length - 1; k++){ a += w[k] / sum; if (r < a) break; }
+    // шипы и пропуски — только там, где соседи остаются в досягаемости прыжка
+    // (апекс кистей 194 ед.), и не два подряд
+    if (k >= K.SPIKE && (ledgeY(i + 1) - ledgeY(i - 1) > 184 || ledgeKind(i - 1) >= K.SPIKE)) k = K.CORN;
+  }
+  kindMemo.set(i, k);
+  return k;
+}
+function ledgeLen(i){
+  const k = ledgeKind(i), tr = tierOf(i), h = hash(i * 5.13);
+  switch (k){
+    case K.BALC: return (62 + h * 24) * (1 - 0.25 * tr);
+    case K.SIGN: return 26 + h * 8;
+    case K.FLAG: return 30 + h * 10;
+    case K.AWN:  return (48 + h * 18) * (1 - 0.2 * tr);
+    case K.GOND: return 40 + h * 14;
+    default:     return (44 + h * 34) * (1 - 0.32 * tr);
+  }
+}
+// люлька качается на тросах: одно смещение и для рисования, и для хвата, и для виса
+const ledgeDX  = i => ledgeKind(i) === K.GOND ? Math.sin(t * (0.9 + 0.7 * tierOf(i)) + i * 1.3) * (18 + 30 * tierOf(i)) : 0;
+const ledgeTip = i => ledgeSide(i) * (WALL - ledgeLen(i)) + ledgeDX(i);
+const ledgeOut = i => ledgeSide(i) * WALL + ledgeDX(i);
+const canGrab  = i => { const k = ledgeKind(i); return k !== K.SPIKE && k !== K.VOID && !broken.has(i); };
+const hasPigeons  = i => { const k = ledgeKind(i); return (k === K.CORN || k === K.BALC) && hash(i * 7.91) < 0.26 && !scattered.has(i); };
+const crumbleTime = i => lerp(0.85, 0.45, tierOf(i));
+// ветер: выше 4500 м сносит в полёте; -1..1, меняется медленно, с порывами
+function windAt(alt){
+  const s = clamp((alt - 4500) / 2200, 0, 1);
+  return s * (Math.sin(t * 0.31) * 0.62 + Math.sin(t * 0.83 + 1.3) * 0.38);
+}
+
+// ============================================================================
+//  ФОН
+// ============================================================================
+
+// Дизер: градиент неба на тёмных фазах даёт видимые горизонтальные полосы
+// (8-битная сетка). Слабый шум поверх ломает их и стоит один fillRect на кадр.
+let noisePat = null;
+function makeNoise(){
+  const n = document.createElement('canvas'); n.width = n.height = 96;
+  const c2 = n.getContext('2d'), im = c2.createImageData(96, 96);
+  for (let i = 0; i < im.data.length; i += 4){
+    const v = Math.random() < 0.5 ? 0 : 255;
+    im.data[i] = im.data[i+1] = im.data[i+2] = v;
+    im.data[i+3] = 5;
+  }
+  c2.putImageData(im, 0, 0);
+  noisePat = ctx.createPattern(n, 'repeat');
+}
+
+// Горизонтальный разброс декора. Считается от ШИРИНЫ КАДРА В ЕДИНИЦАХ, а не от
+// фиксированного числа: в портрете видно ±200 ед., в альбомной ±760 — фиксированный
+// разброс вымел бы весь декор за края портретного экрана.
+const span = () => Math.max(W / scale * 1.12, 470);
+function wrapX(v, s){ const h = s / 2; v = ((v + h) % s + s) % s - h; return v; }
+
+// --- звёзды: видны в начале (ночь), пропадают днём, возвращаются в космосе
+function drawStars(alt){
+  const a = Math.max(clamp((700 - alt) / 700, 0, 1), clamp((alt - 3800) / 2600, 0, 1));
+  if (a < 0.02) return;
+  const P = 0.05, G = 52;
+  const yA = camY * P, yB = yA + viewU;
+  const xA = -W / 2 / scale, xB = W / 2 / scale;
+  ctx.fillStyle = '#ffffff';
+  for (let gy = Math.floor(yA / G); gy <= Math.ceil(yB / G); gy++){
+    for (let gx = Math.floor(xA / G); gx <= Math.ceil(xB / G); gx++){
+      const h3 = hash(gx * 91.7 + gy * 13.1 + 9.1);
+      if (h3 > 0.6) continue;
+      const h1 = hash(gx * 57.1 + gy * 131.7), h2 = hash(gx * 19.3 + gy * 77.9 + 5.5);
+      const tw = 0.55 + 0.45 * Math.sin(t * 1.6 + h1 * 40);
+      ctx.globalAlpha = a * (0.22 + 0.78 * (1 - h3 / 0.6)) * tw;
+      const r = h3 < 0.08 ? 1.2 : 0.7;
+      ctx.fillRect(sx((gx + h1) * G) - r, sy((gy + h2) * G, P) - r, r * 2, r * 2);
+    }
+  }
+  ctx.globalAlpha = 1;
+}
+
+// --- солнце: поднимается по высоте. Это и есть название игры.
+const SUN = [[0,1.14],[400,0.99],[1200,0.80],[2400,0.55],[4000,0.36],[6500,0.26],[12000,0.20]];
+function sunFrac(alt){
+  for (let i = 0; i < SUN.length - 1; i++){
+    if (alt <= SUN[i+1][0]){
+      const k = smooth((alt - SUN[i][0]) / (SUN[i+1][0] - SUN[i][0]));
+      return lerp(SUN[i][1], SUN[i+1][1], k);
+    }
+  }
+  return SUN[SUN.length-1][1];
+}
+function drawSun(alt){
+  const cx = sx(112), cy = sunFrac(alt) * H;
+  const R = 46 * scale;
+  const glowA = clamp(1 - (alt - 5200) / 4000, 0.15, 1);      // в космосе ореол гаснет
+  const g = ctx.createRadialGradient(cx, cy, R * 0.4, cx, cy, R * 7.5);
+  g.addColorStop(0,    acc(0.55 * glowA));
+  g.addColorStop(0.28, acc(0.16 * glowA));
+  g.addColorStop(1,    acc(0));
+  ctx.fillStyle = g;
+  ctx.fillRect(cx - R * 8, cy - R * 8, R * 16, R * 16);
+  // диск подкрашен акцентом: на рассвете золотой, выше — выбеливается
+  const k = clamp((alt - 1800) / 3000, 0, 1);
+  ctx.beginPath(); ctx.arc(cx, cy, R * (1 - 0.18 * clamp((alt - 6000) / 4000, 0, 1)), 0, 6.2832);
+  ctx.fillStyle = `rgb(${lerp(PAL.acc[0],255,k)|0},${lerp(PAL.acc[1],252,k)|0},${lerp(PAL.acc[2],238,k)|0})`;
+  ctx.fill();
+}
+function drawMoon(alt){
+  const a = clamp((1000 - alt) / 1000, 0, 1);
+  if (a < 0.02) return;
+  const cx = sx(-150), cy = H * 0.15, R = 26 * scale;
+  const g = ctx.createRadialGradient(cx, cy, R * 0.5, cx, cy, R * 5);
+  g.addColorStop(0, `rgba(190,205,255,${0.22 * a})`); g.addColorStop(1, 'rgba(190,205,255,0)');
+  ctx.fillStyle = g; ctx.fillRect(cx - R*5, cy - R*5, R*10, R*10);
+  ctx.beginPath(); ctx.arc(cx, cy, R, 0, 6.2832);
+  ctx.fillStyle = `rgba(226,233,255,${a})`; ctx.fill();
+}
+
+// --- профили гребней (сумма синусов: бесконечная ширина без массивов)
+// Частоты подобраны под ширину кадра: в портрете видно всего ~400 ед. по горизонтали,
+// поэтому длина волны гребня должна быть 250–450 ед., иначе гребень выглядит прямой линией.
+// Медленный член (f*0.21) не даёт панораме в альбомной выглядеть повтором одного холма.
+function profJag(x, f, s){            // горы
+  const a = Math.sin(x * f + s), b = Math.sin(x * f * 1.93 + s * 2.1);
+  const slow = 0.5 + 0.5 * Math.sin(x * f * 0.21 + s * 0.7);
+  return (0.22 + 0.46 * Math.abs(a) + 0.24 * Math.abs(b) * Math.abs(a)) * (0.55 + 0.55 * slow);
+}
+function profSmooth(x, f, s){         // холмы
+  return (0.50 + 0.24 * Math.sin(x * f + s) + 0.13 * Math.sin(x * f * 2.7 + s * 1.9)
+               + 0.07 * Math.sin(x * f * 5.3 + s * 3.3)) * (0.7 + 0.5 * Math.sin(x * f * 0.19 + s));
+}
+
+function ridgeLayer(p, alpha, amp, f, seed, jag){
+  if (camY * p > amp + 60) return;                 // слой уже ушёл вниз
+  const y0 = H + camY * p * scale;                 // линия земли этого слоя
+  ctx.fillStyle = sil(alpha);
+  ctx.beginPath();
+  ctx.moveTo(0, y0 + 4);
+  for (let px = 0; px <= W + 6; px += 6){
+    const wx = (px - W / 2) / scale;
+    const h = (jag ? profJag(wx, f, seed) : profSmooth(wx, f, seed)) * amp;
+    ctx.lineTo(px, y0 - h * scale);
+  }
+  ctx.lineTo(W + 6, y0 + 4);
+  ctx.closePath(); ctx.fill();
+  if (y0 < H) ctx.fillRect(0, y0, W, H - y0 + 2);
+}
+
+// --- городская застройка внизу. Прыгаем по крышам, значит и на горизонте город,
+//     а не лес: иначе фикция разваливается на первом же кадре.
+function cityBlock(x, base, h, seed){
+  const w = h * (0.42 + 0.34 * hash(seed * 1.9));
+  ctx.moveTo(x - w/2, base); ctx.lineTo(x - w/2, base - h);
+  ctx.lineTo(x + w/2, base - h); ctx.lineTo(x + w/2, base);
+  ctx.closePath();
+  if (hash(seed * 4.3) > 0.5){                      // ступень-надстройка
+    const w2 = w * 0.46, h2 = h * 0.16;
+    ctx.moveTo(x - w2/2, base - h); ctx.lineTo(x - w2/2, base - h - h2);
+    ctx.lineTo(x + w2/2, base - h - h2); ctx.lineTo(x + w2/2, base - h);
+    ctx.closePath();
+  }
+}
+function cityTower(x, base, h, seed){
+  const w = h * (0.20 + 0.10 * hash(seed * 2.7)), sp = Math.max(0.7, h * 0.014);
+  ctx.moveTo(x - w/2, base); ctx.lineTo(x - w/2, base - h);
+  ctx.lineTo(x + w/2, base - h); ctx.lineTo(x + w/2, base);
+  ctx.closePath();
+  ctx.moveTo(x - sp, base - h); ctx.lineTo(x - sp, base - h * 1.26);
+  ctx.lineTo(x + sp, base - h * 1.26); ctx.lineTo(x + sp, base - h);
+  ctx.closePath();
+}
+function cityGabled(x, base, h, seed){
+  const w = h * (0.9 + 0.5 * hash(seed * 3.1));
+  ctx.moveTo(x - w/2, base); ctx.lineTo(x - w/2, base - h * 0.62);
+  ctx.lineTo(x,       base - h);
+  ctx.lineTo(x + w/2, base - h * 0.62); ctx.lineTo(x + w/2, base);
+  ctx.closePath();
+}
+function cityCrane(x, base, h, seed){
+  const w = Math.max(0.8, h * 0.018), face = hash(seed * 5.7) > 0.5 ? 1 : -1;
+  const top = base - h * 1.3;
+  ctx.moveTo(x - w, base); ctx.lineTo(x - w, top); ctx.lineTo(x + w, top); ctx.lineTo(x + w, base);
+  ctx.closePath();
+  const jib = h * 0.75 * face, back = -h * 0.26 * face;             // стрела и противовес
+  ctx.moveTo(x + back, top - w * 3); ctx.lineTo(x + jib, top - w * 3);
+  ctx.lineTo(x + jib, top - w); ctx.lineTo(x + back, top - w);
+  ctx.closePath();
+  ctx.moveTo(x + back - w * 4, top - w * 6); ctx.lineTo(x + back, top - w * 6);
+  ctx.lineTo(x + back, top);                 ctx.lineTo(x + back - w * 4, top);
+  ctx.closePath();
+  const hx = x + jib * 0.72;                                        // трос с крюком
+  ctx.moveTo(hx - w * 0.5, top - w * 3); ctx.lineTo(hx + w * 0.5, top - w * 3);
+  ctx.lineTo(hx + w * 0.5, top + h * 0.30); ctx.lineTo(hx - w * 0.5, top + h * 0.30);
+  ctx.closePath();
+}
+
+function propLayer(p, alpha, spacing, hMin, hMax, mix, lights){
+  if (camY * p > hMax * 1.3 + 80) return;
+  const y0 = H + camY * p * scale;
+  const xA = (-W / 2) / scale, xB = (W / 2) / scale;
+  const k0 = Math.floor(xA / spacing) - 1, k1 = Math.ceil(xB / spacing) + 1;
+  ctx.fillStyle = sil(alpha);
+  ctx.beginPath();
+  for (let k = k0; k <= k1; k++){
+    const h1 = hash(k * 3.7 + p * 100), h2 = hash(k * 11.3 + p * 57.4), h3 = hash(k * 7.1 + p * 23.9);
+    const x = sx((k + (h1 - 0.5) * 0.62) * spacing);
+    const h = (hMin + h2 * (hMax - hMin)) * scale;
+    if      (h3 < mix[0]) cityBlock(x, y0, h, k + p);
+    else if (h3 < mix[1]) cityTower(x, y0, h * 1.35, k + p);
+    else if (h3 < mix[2]) cityGabled(x, y0, h * 0.5, k + p);
+    else                  cityCrane(x, y0, h, k + p);
+  }
+  ctx.fill();
+  if (y0 < H) ctx.fillRect(0, y0, W, H - y0 + 2);
+
+  // тёплые окна в ближнем слое — то, ради чего вообще стоит рисовать город ночью
+  if (lights && lightK > 0.02){
+    ctx.fillStyle = `rgba(255,198,120,${0.55 * lightK * alpha})`;
+    for (let k = k0; k <= k1; k++){
+      const h1 = hash(k * 3.7 + p * 100), h2 = hash(k * 11.3 + p * 57.4), h3 = hash(k * 7.1 + p * 23.9);
+      if (h3 >= mix[1]) continue;                       // окна только у блоков и башен
+      const x = sx((k + (h1 - 0.5) * 0.62) * spacing);
+      const h = (hMin + h2 * (hMax - hMin)) * scale * (h3 < mix[0] ? 1 : 1.35);
+      const w = h * (h3 < mix[0] ? 0.42 + 0.34 * hash((k + p) * 1.9) : 0.20 + 0.10 * hash((k + p) * 2.7));
+      windows(x - w/2, y0 - h, w, h, k * 2.3 + p, 1);
+    }
+  }
+}
+
+// Сетка окон. thresh < 0 — рисуются все (тёмные дневные окна, фактура фасада),
+// иначе только часть (горящие ночью). Обе сетки совпадают клетка в клетку.
+function windows(x, y, w, h, seed, fadeDown, thresh = 0.58){
+  const cw = 4.6 * scale, ch = 6.2 * scale, gx = 4.2 * scale, gy = 5.4 * scale;
+  const cols = Math.floor((w + gx) / (cw + gx));
+  const rows = Math.floor((h - gy) / (ch + gy));
+  if (cols < 1 || rows < 1) return;
+  const ox = x + (w - (cols * (cw + gx) - gx)) / 2;
+  // Плита у стены колодца шире экрана в разы, и без обрезки по видимой области
+  // сюда уходит больше десяти тысяч fillRect на кадр — почти весь бюджет.
+  const c0 = Math.max(0, Math.floor((-cw - ox) / (cw + gx)));
+  const c1 = Math.min(cols - 1, Math.ceil((W - ox) / (cw + gx)));
+  const r0 = Math.max(0, Math.floor((-ch - y - gy) / (ch + gy)));
+  const r1 = Math.min(rows - 1, Math.ceil((H - y - gy) / (ch + gy)));
+  for (let r = r0; r <= r1; r++){
+    const wy = y + gy + r * (ch + gy);
+    const f = fadeDown ? 1 - (wy - y) / h : 1;          // тают книзу вместе с телом
+    if (f <= 0.06) continue;
+    ctx.globalAlpha = f;
+    for (let c = c0; c <= c1; c++){
+      if (hash(seed * 31.7 + r * 7.3 + c * 2.11) < thresh) continue;
+      ctx.fillRect(ox + c * (cw + gx), wy, cw, ch);
+    }
+  }
+  ctx.globalAlpha = 1;
+}
+
+// --- облака: гряда из кружков со скруглённым низом, без «плиты» под ней,
+//     иначе облако читается как холм (проверено на кадре 4400 м)
+function cloudBlob(cx, cy, w, h, seed){
+  const n = 7;
+  for (let i = 0; i < n; i++){
+    const k = i / (n - 1);
+    const env = Math.sin(Math.PI * (0.10 + 0.80 * k));       // огибающая: по краям тоньше
+    const r = h * (0.26 + 0.74 * env) * (0.72 + 0.56 * hash(seed + i * 3.1));
+    const x = cx - w / 2 + w * k;
+    const y = cy - h * 0.10 - h * 0.16 * env;
+    ctx.moveTo(x + r, y); ctx.arc(x, y, r, 0, 6.2832);
+  }
+}
+function cloudLayer(alt, p, from, to, spacingY, size, alphaMax, dark, speed){
+  const fade = Math.min(clamp((alt - from) / 700, 0, 1), clamp((to - alt) / 900, 0, 1));
+  if (fade <= 0.01) return;
+  const S = span();
+  const yA = camY * p, yB = yA + viewU;
+  ctx.beginPath();
+  for (let j = Math.floor(yA / spacingY) - 1; j <= Math.ceil(yB / spacingY) + 1; j++){
+    const h1 = hash(j * 5.9 + p * 31), h2 = hash(j * 13.7 + p * 17), h3 = hash(j * 2.3 + p * 41);
+    const wx = wrapX((h2 - 0.5) * S * 2 + (h1 < 0.5 ? 1 : -1) * t * speed, S * 1.5);
+    const wy = (j + h1 * 0.7) * spacingY;
+    cloudBlob(sx(wx), sy(wy, p), size * (0.7 + h3 * 0.9) * scale, size * (0.20 + h3 * 0.16) * scale, j);
+  }
+  if (dark) ctx.fillStyle = sil(alphaMax * fade);
+  else      ctx.fillStyle = `rgba(${lerp(PAL.sky[2][0],255,.86)|0},${lerp(PAL.sky[2][1],255,.86)|0},${lerp(PAL.sky[2][2],255,.9)|0},${alphaMax * fade})`;
+  ctx.fill();
+}
+
+// --- парящие объекты: птицы → шары → дирижабли → спутники
+function floaters(alt, p, from, to, spacingY, speed, kind){
+  const fade = Math.min(clamp((alt - from) / 500, 0, 1), clamp((to - alt) / 700, 0, 1));
+  if (fade <= 0.01) return;
+  const S = span();
+  const yA = camY * p, yB = yA + viewU;
+  ctx.fillStyle = sil(0.55 + 0.35 * fade);
+  ctx.beginPath();
+  for (let j = Math.floor(yA / spacingY) - 1; j <= Math.ceil(yB / spacingY) + 1; j++){
+    const h1 = hash(j * 8.1 + kind * 3.7), h2 = hash(j * 21.3 + kind * 9.1);
+    if (h2 > 0.72) continue;
+    const dir = h1 < 0.5 ? 1 : -1;
+    const wx = wrapX((h1 - 0.5) * S * 2 + dir * t * speed, S * 1.4);
+    const X = sx(wx), Y = sy((j + h2) * spacingY, p), s = scale;
+    if (kind === 0){                                        // стая птиц
+      for (let b = 0; b < 3; b++){
+        const bx = X + (b - 1) * 26 * s * dir, by = Y + (b === 1 ? -9 * s : 0);
+        const flap = Math.sin(t * 7 + j + b) * 5 * s;
+        ctx.moveTo(bx - 9*s, by); ctx.lineTo(bx, by - 3*s - flap); ctx.lineTo(bx + 9*s, by);
+        ctx.lineTo(bx, by + 1.4*s); ctx.closePath();
+      }
+    } else if (kind === 1){                                 // воздушный шар
+      const r = 17 * s;
+      ctx.moveTo(X + r, Y); ctx.arc(X, Y, r, 0, 6.2832);
+      ctx.moveTo(X - r*0.55, Y + r*0.75); ctx.lineTo(X + r*0.55, Y + r*0.75);
+      ctx.lineTo(X + r*0.28, Y + r*1.55); ctx.lineTo(X - r*0.28, Y + r*1.55); ctx.closePath();
+      ctx.moveTo(X - r*0.3, Y + r*1.55); ctx.lineTo(X - r*0.16, Y + r*1.55);
+      ctx.lineTo(X - r*0.16, Y + r*2.0); ctx.lineTo(X - r*0.3, Y + r*2.0); ctx.closePath();
+      ctx.moveTo(X + r*0.16, Y + r*1.55); ctx.lineTo(X + r*0.3, Y + r*1.55);
+      ctx.lineTo(X + r*0.3, Y + r*2.0); ctx.lineTo(X + r*0.16, Y + r*2.0); ctx.closePath();
+    } else if (kind === 2){                                 // дирижабль
+      const w = 62 * s, h = 20 * s;
+      ctx.moveTo(X + w, Y); ctx.ellipse(X, Y, w, h, 0, 0, 6.2832);
+      ctx.moveTo(X - w*0.95, Y); ctx.lineTo(X - w*1.35, Y - h*1.1);
+      ctx.lineTo(X - w*1.35, Y + h*1.1); ctx.closePath();
+      ctx.moveTo(X - w*0.25, Y + h*0.85); ctx.lineTo(X + w*0.25, Y + h*0.85);
+      ctx.lineTo(X + w*0.2, Y + h*1.7); ctx.lineTo(X - w*0.2, Y + h*1.7); ctx.closePath();
+    } else {                                                // спутник
+      // в космосе тёмный силуэт на тёмном небе не читается — рисуем контровым
+      const s2 = 13 * s, rot = Math.sin(t * 0.5 + j) * 0.25;
+      ctx.save(); ctx.translate(X, Y); ctx.rotate(rot);
+      ctx.fillStyle = acc(0.30 * fade);
+      ctx.fillRect(-s2*0.5, -s2*0.5, s2, s2);
+      ctx.fillRect(-s2*2.6, -s2*0.26, s2*2.0, s2*0.52);
+      ctx.fillRect( s2*0.6, -s2*0.26, s2*2.0, s2*0.52);
+      ctx.fillStyle = PAL.silCss;
+      ctx.fillRect(-s2*0.34, -s2*0.34, s2*0.68, s2*0.68);
+      if (Math.sin(t * 3 + j) > 0.4){                       // мигающий огонёк
+        ctx.fillStyle = acc(0.9 * fade);
+        ctx.fillRect(-s2*0.12, -s2*0.78, s2*0.24, s2*0.24);
+      }
+      ctx.restore();
+      ctx.fillStyle = sil(0.55 + 0.35 * fade);
+    }
+  }
+  ctx.fill();
+}
+
+// ============================================================================
+//  ГЕРОЙ И ПЛАТФОРМЫ
+// ============================================================================
+
+// Паркурщик. Позы заданы абсолютными координатами суставов в долях роста:
+// x — по направлению взгляда, y — вверх от стоп. Между позами линейная смесь,
+// параметр смеси — вертикальная скорость, поэтому анимация бесплатно
+// синхронна с физикой и не расходится с ней ни на кадр.
+const POSE = {
+  launch: { hip:[0,0.46], sh:[0.03,0.80], hd:[0.06,0.95],                 // отрыв
+            eF:[0.17,0.88], hF:[0.26,1.03], eB:[-0.16,0.68], hB:[-0.30,0.56],
+            kF:[0.18,0.34], fF:[0.22,0.14], kB:[-0.14,0.24], fB:[-0.36,0.09] },
+  apex:   { hip:[0,0.46], sh:[0.02,0.80], hd:[0.05,0.95],                 // беговой прыжок
+            eF:[0.20,0.86], hF:[0.36,0.97], eB:[-0.18,0.71], hB:[-0.34,0.57],
+            kF:[0.24,0.44], fF:[0.31,0.24], kB:[-0.20,0.30], fB:[-0.43,0.15] },
+  // Обе руки вверх дают «зарядку», а не паркур: в падении одна рука идёт вперёд-вниз,
+  // вторая отведена назад-вверх. Асимметрия — единственное, что отличает бегуна от звёздочки.
+  fall:   { hip:[0,0.46], sh:[-0.03,0.80], hd:[-0.06,0.95],               // выход на ноги
+            eF:[0.17,0.71], hF:[0.30,0.59], eB:[-0.17,0.75], hB:[-0.31,0.88],
+            kF:[0.16,0.26], fF:[0.23,0.03], kB:[-0.11,0.25], fB:[-0.15,0.02] },
+  // Вис: кисти на уровне HANDY — там же, где хват. Прямые руки и прямые ноги
+  // дают вертикальную палку вместо человека, поэтому локти разведены,
+  // колени согнуты, а дальняя нога упёрта в стену за спиной.
+  hang:   { hip:[0.04,0.29], sh:[0.02,0.61], hd:[0.05,0.755],
+            eF:[0.13,0.79], hF:[0.05,1.00], eB:[-0.11,0.80], hB:[-0.04,1.00],
+            kF:[0.18,0.12], fF:[0.08,-0.07], kB:[-0.09,0.10], fB:[-0.20,-0.02] },
+  // Момент захвата: корпус ещё несёт вперёд, ноги вылетают вбок.
+  grab:   { hip:[0.03,0.33], sh:[0.01,0.64], hd:[0.05,0.785],
+            eF:[0.11,0.82], hF:[0.04,1.00], eB:[-0.10,0.83], hB:[-0.05,1.00],
+            kF:[0.24,0.24], fF:[0.40,0.13], kB:[0.14,0.18], fB:[0.30,0.01] },
+};
+const JOINTS = ['hip','sh','hd','eF','hF','eB','hB','kF','fF','kB','fB'];
+const pbA = {}, pbB = {};
+for (const j of JOINTS){ pbA[j] = [0,0]; pbB[j] = [0,0]; }
+function mixPose(a, b, k, out){
+  for (const j of JOINTS){
+    out[j][0] = a[j][0] + (b[j][0] - a[j][0]) * k;
+    out[j][1] = a[j][1] + (b[j][1] - a[j][1]) * k;
+  }
+  return out;
+}
+function currentPose(){
+  if (hero.hang >= 0) return hero.catch > 0.01 ? mixPose(POSE.hang, POSE.grab, hero.catch, pbA)
+                                               : POSE.hang;
+  const k = clamp(hero.vy / JUMP, -1, 1);
+  return k >= 0 ? mixPose(POSE.apex, POSE.launch, k, pbA)
+                : mixPose(POSE.apex, POSE.fall, -k, pbA);
+}
+
+// Все куски намотаны в одну сторону, поэтому фигура — ОДИН путь и одна заливка.
+// Конус строится от направления отрезка, направление на намотку не влияет;
+// у окружностей приходится звать arc с anticlockwise=true, иначе они прорежут
+// дырки в теле по правилу nonzero.
+function limb(ax, ay, bx, by, w1, w2){
+  const dx = bx - ax, dy = by - ay, L = Math.hypot(dx, dy) || 1;
+  const nx = -dy / L, ny = dx / L;
+  ctx.moveTo(ax + nx*w1, ay + ny*w1); ctx.lineTo(bx + nx*w2, by + ny*w2);
+  ctx.lineTo(bx - nx*w2, by - ny*w2); ctx.lineTo(ax - nx*w1, ay - ny*w1);
+  ctx.closePath();
+}
+function knob(x, y, r){ ctx.moveTo(x + r, y); ctx.arc(x, y, r, 0, 6.2832, true); }
+
+function heroFigure(X, Y, s, face, p){
+  const P = j => [X + p[j][0] * s * face, Y - p[j][1] * s];
+  const hip = P('hip'), sh = P('sh'), hd = P('hd');
+  const eF = P('eF'), hF = P('hF'), eB = P('eB'), hB = P('hB');
+  const kF = P('kF'), fF = P('fF'), kB = P('kB'), fB = P('fB');
+  ctx.beginPath();
+  limb(sh[0],sh[1], eB[0],eB[1], s*0.048, s*0.038);      // дальняя рука
+  limb(eB[0],eB[1], hB[0],hB[1], s*0.038, s*0.026);
+  limb(hip[0],hip[1], kB[0],kB[1], s*0.068, s*0.048);    // дальняя нога
+  limb(kB[0],kB[1], fB[0],fB[1], s*0.048, s*0.030);
+  limb(hip[0],hip[1], sh[0],sh[1], s*0.095, s*0.115);    // корпус
+  limb(hip[0],hip[1], kF[0],kF[1], s*0.075, s*0.055);    // ближняя нога
+  limb(kF[0],kF[1], fF[0],fF[1], s*0.055, s*0.034);
+  limb(sh[0],sh[1], eF[0],eF[1], s*0.052, s*0.042);      // ближняя рука
+  limb(eF[0],eF[1], hF[0],hF[1], s*0.042, s*0.028);
+  knob(hip[0],hip[1], s*0.078); knob(sh[0],sh[1], s*0.100);
+  knob(kF[0],kF[1], s*0.052);   knob(kB[0],kB[1], s*0.046);
+  knob(eF[0],eF[1], s*0.042);   knob(eB[0],eB[1], s*0.038);
+  knob(fF[0],fF[1], s*0.032);   knob(fB[0],fB[1], s*0.029);
+  knob(hd[0],hd[1], s*0.105);
+  ctx.fill();
+}
+
+function drawHero(){
+  const s = HH * scale, p = currentPose(), X = sx(hero.x);
+  // На висе тело чуть покачивается — иначе кадр с неподвижным героем выглядит
+  // не паузой перед прыжком, а зависшей игрой.
+  const sway = hero.hang >= 0 ? Math.sin(t * 1.7) * 1.1 * scale : 0;
+  const Y = sy(hero.y) + sway;
+
+  // послесвечение: 5 призраков акцентным цветом — читаются и на тёмном небе
+  if (hero.hang < 0){
+    for (let i = 0; i < trail.length; i++){
+      const g = trail[i], k = (i + 1) / trail.length;
+      ctx.fillStyle = acc(0.05 * k);
+      heroFigure(sx(g.x), sy(g.y), s * 0.94, hero.face, p);
+    }
+  }
+  // На висе герой стоит вплотную к стене, и чёрный силуэт на чёрном доме исчезает.
+  // Слабый ореол за фигурой отделяет её от любого фона, не ломая силуэтную подачу.
+  const hg = ctx.createRadialGradient(X, Y - s * 0.5, 0, X, Y - s * 0.5, s * 0.95);
+  hg.addColorStop(0, acc(0.16)); hg.addColorStop(1, acc(0));
+  ctx.fillStyle = hg;
+  ctx.fillRect(X - s, Y - s * 1.45, s * 2, s * 1.9);
+
+  ctx.save(); ctx.translate(-2.0 * scale, -2.3 * scale);   // контровой свет
+  ctx.fillStyle = acc(0.95);
+  heroFigure(X, Y, s * 1.05, hero.face, p);
+  ctx.restore();
+  ctx.fillStyle = PAL.silCss;
+  heroFigure(X, Y, s, hero.face, p);
+}
+
+// Обвес на стене: кондиционеры, тарелки, мачты с проблесковым огнём.
+// Тёмное на тёмном, без акцента — акцентную кромку носят только выступы,
+// за которые можно зацепиться, иначе игрок перестанет им верить.
+function wallProps(i, xw, Y, side, depth, alt){
+  const h1 = hash(i * 5.31), s = scale, hi = clamp((alt - 3500) / 2500, 0, 1);
+  const oy = Y + depth * (0.25 + hash(i * 8.7) * 0.45);
+  ctx.fillStyle = sil(0.9);
+  ctx.beginPath();
+  if (h1 < 0.34 * (1 - hi) + 0.05){                       // блок кондиционера
+    const bw = 15 * s, bh = 11 * s, x = xw - side * bw;
+    ctx.rect(Math.min(x, x + side*bw), oy, bw, bh);
+    ctx.rect(Math.min(x, x + side*bw) + bw*0.2, oy + bh, bw*0.6, 3*s);
+  } else if (h1 < 0.62){                                  // тарелка на кронштейне
+    const r = 8 * s, x = xw - side * (r + 4*s);
+    ctx.rect(Math.min(xw, x), oy - 1.2*s, Math.abs(xw - x), 2.4*s);
+    ctx.moveTo(x + r, oy); ctx.ellipse(x, oy, r, r * 0.6, side * 0.5, 0, 6.2832);
+  } else if (h1 < 0.80){                                  // мачта с огнём
+    const mh = (30 + hash(i * 2.9) * 26) * s, x = xw - side * 6 * s;
+    ctx.rect(x - 1.4*s, oy - mh, 2.8*s, mh);
+    ctx.fill();
+    if (Math.sin(t * 2.2 + i) > 0.2){
+      ctx.fillStyle = 'rgba(255,90,70,0.9)';
+      ctx.fillRect(x - 2*s, oy - mh - 4*s, 4*s, 4*s);
+    }
+    return;
+  } else return;
+  ctx.fill();
+}
+
+// Колодец. Каждый выступ принадлежит плите-этажу, уходящей в сторону стены.
+// Внизу плита шире шага между выступами — соседи перекрываются и стена
+// получается сплошной. С высотой плита сжимается до отдельного блока, стена
+// расступается, и игрок выходит к открытому небу. Один параметр на весь переход.
+function drawShaft(alt){
+  const iA = Math.floor((camY - 240 - Y0) / STEP);
+  const iB = Math.ceil((camY + viewU + 240 - Y0) / STEP);
+  const hi   = clamp((alt - 1800) / 2600, 0, 1);
+  // Внизу плита обязана дотянуться до края экрана, иначе в альбомной колодец
+  // превращается в две висящие в воздухе стопки блоков.
+  const slabW = lerp(Math.max(320, W / scale * 0.62), 62, hi) * scale;
+  const depth = lerp(STEP * 2.45, 122, hi) * scale;
+  const lt = LT * scale;
+  // Сверху вниз: плита уходит ниже соседа и накрывала бы его выступ.
+  // В обратном порядке каждый выступ рисуется после всех плит, что над ним.
+  for (let i = iB; i >= Math.max(0, iA); i--){
+    const y = ledgeY(i), Y = sy(y);
+    if (Y < -depth - 40 || Y > H + 60) continue;
+    const side = ledgeSide(i);
+    // грань плиты гуляет на 16 ед.: без этого стена — идеально прямая линия
+    // во весь экран, и колодец выглядит нарисованным по линейке
+    const face = WALL + hash(i * 6.73) * 16;
+    const xw = sx(side * face), xt = sx(ledgeTip(i));
+    const bx = side > 0 ? xw : xw - slabW;
+
+    const g = ctx.createLinearGradient(0, Y, 0, Y + depth);
+    // Основная часть плиты непрозрачна: полупрозрачный дом, наехавший на диск
+    // солнца, давал серый прямоугольник поперёк него вместо силуэта.
+    g.addColorStop(0, sil(1)); g.addColorStop(0.62, sil(0.95)); g.addColorStop(1, sil(0));
+    ctx.fillStyle = g;
+    ctx.fillRect(bx, Y, slabW, depth);
+    // Днём окна тоже нужны: без них плита — просто бетонный прямоугольник.
+    // Тёмная сетка даёт фактуру фасада, тёплая поверх неё зажигает часть окон.
+    const wx = bx + 6 * scale, ww = slabW - 12 * scale, wh = depth - lt;
+    ctx.fillStyle = 'rgba(0,0,0,0.30)';
+    windows(wx, Y + lt, ww, wh, i * 1.7, 1, -1);
+    if (lightK > 0.02){
+      ctx.fillStyle = `rgba(255,198,120,${0.9 * lightK})`;
+      windows(wx, Y + lt, ww, wh, i * 1.7, 1);
+    }
+
+    wallProps(i, xw, Y, side, depth, alt);
+
+    drawLedge(i, Y, side, xw, lt);
+  }
+}
+
+function bracket(xw, Y, side, lw, lt){                               // косынка: толстая у стены,
+  ctx.beginPath(); ctx.moveTo(xw, Y + lt);                           // сходит на нет к краю
+  ctx.lineTo(xw - side * lw * 0.8, Y + lt); ctx.lineTo(xw, Y + lt + lw * 0.42);
+  ctx.closePath(); ctx.fill();
+}
+function pigeons(i, lx, lw, Y){
+  if (!hasPigeons(i)) return;
+  const n = 1 + Math.floor(hash(i * 2.2) * 3), s = scale;
+  for (let j = 0; j < n; j++){
+    const x = lx + lw * (0.2 + 0.6 * hash(i * 3.3 + j));
+    const bob = Math.sin(t * 2 + j + i) > 0.9 ? s : 0;
+    ctx.beginPath(); ctx.ellipse(x, Y - 4*s - bob, 4.5*s, 3.2*s, 0, 0, 6.2832); ctx.fill();
+    ctx.beginPath(); ctx.arc(x + 3.5*s, Y - 7.5*s - bob, 2*s, 0, 6.2832); ctx.fill();
+  }
+}
+// Восемь видов. Акцентную кромку носит только то, за что можно зацепиться:
+// у шипов её нет, и это единственная подсказка, которая игроку нужна.
+function drawLedge(i, Y, side, xw, lt){
+  const k = ledgeKind(i);
+  if (k === K.VOID) return;
+  const s = scale, xt = sx(ledgeTip(i)), lw = Math.abs(xw - xt), lx = Math.min(xw, xt);
+  let Yl = Y;
+  ctx.fillStyle = PAL.silCss;
+  if (broken.has(i)){                                              // огрызок у стены
+    ctx.fillRect(side > 0 ? xw : xw - 9*s, Y, 9*s, lt);
+    return;
+  }
+  if (k === K.CRUMB && crumble.has(i)) Yl += (hash(t * 131) - 0.5) * 3 * s;   // дрожит перед обвалом
+
+  if (k === K.GOND){
+    // люлька мойщиков окон: площадка на двух тросах с балки, мотор у стены
+    const xo = sx(ledgeOut(i)), x0 = Math.min(xo, xt), w = Math.abs(xo - xt);
+    const ax = sx(side * (WALL + 10)), ay = Y - 96 * s;
+    ctx.fillRect(Math.min(ax, sx(side * (WALL - 6))), ay - 2*s, 16*s, 3*s);          // балка
+    ctx.strokeStyle = PAL.silCss; ctx.lineWidth = 1.3 * s;
+    ctx.beginPath(); ctx.moveTo(xt + side * 2*s, Yl); ctx.lineTo(ax, ay);
+    ctx.moveTo(xo - side * 2*s, Yl); ctx.lineTo(ax, ay); ctx.stroke();
+    ctx.fillRect(x0, Yl, w, lt);                                                   // площадка
+    ctx.fillRect(x0 + (side > 0 ? w - 12*s : 2*s), Yl - 9*s, 10*s, 9*s);           // мотор
+    ctx.fillRect(x0, Yl + lt, w, 3*s);                                             // бортик
+    ctx.fillStyle = acc(0.85); ctx.fillRect(x0, Yl - 2.2*s, w, 2.2*s);
+    return;
+  }
+  if (k === K.AWN){
+    // маркиза: ткань от стены вниз к краю, фестоны по низу, подкос снизу
+    const top = Yl - 14 * s, mid = lerp(xw, xt, 0.5);
+    ctx.beginPath();
+    ctx.moveTo(xw, top); ctx.quadraticCurveTo(mid, Yl - 2*s, xt, Yl);
+    ctx.lineTo(xt, Yl + lt * 0.8);
+    const n = 4;
+    for (let j = 0; j < n; j++){
+      const xb = lerp(xt, xw, (j + 1) / n), ya = lerp(Yl + lt*0.8, top + lt, j / n), yb = lerp(Yl + lt*0.8, top + lt, (j + 1) / n);
+      ctx.quadraticCurveTo(lerp(xt, xw, (j + 0.5) / n), (ya + yb) / 2 + 5*s, xb, yb);
+    }
+    ctx.closePath(); ctx.fill();
+    ctx.strokeStyle = PAL.silCss; ctx.lineWidth = 1.6 * s;                           // подкос
+    ctx.beginPath(); ctx.moveTo(xt, Yl + lt * 0.6); ctx.lineTo(xw, Yl + lw * 0.7); ctx.stroke();
+    ctx.strokeStyle = acc(0.85); ctx.lineWidth = 2.2 * s;                            // кромка по дуге
+    ctx.beginPath(); ctx.moveTo(xw, top - 1.1*s); ctx.quadraticCurveTo(mid, Yl - 3*s, xt, Yl - 1.1*s); ctx.stroke();
+    return;
+  }
+  if (k === K.SIGN){
+    // вывеска: кронштейн от стены, щит висит под кромкой; ночью светится тёплым
+    ctx.fillRect(lx, Yl, lw, 3 * s);
+    const bh = 24 * s, by = Yl + 3 * s;
+    const on = lightK > 0.02 && (hash(i * 4.4) > 0.3 || Math.sin(t * 9 + i) > -0.2);   // часть мигает
+    if (on){
+      const g = ctx.createRadialGradient(lx + lw/2, by + bh/2, 2, lx + lw/2, by + bh/2, lw * 1.4);
+      g.addColorStop(0, `rgba(255,198,120,${0.35 * lightK})`); g.addColorStop(1, 'rgba(255,198,120,0)');
+      ctx.fillStyle = g; ctx.fillRect(lx - lw, by - lw, lw * 3, bh + lw * 2);
+    }
+    ctx.fillStyle = PAL.silCss; ctx.fillRect(lx, by, lw, bh);
+    ctx.fillStyle = on ? `rgba(255,198,120,${0.85 * lightK})` : 'rgba(0,0,0,0.3)';
+    ctx.fillRect(lx + 2.5*s, by + 2.5*s, lw - 5*s, bh - 5*s);
+    ctx.fillStyle = PAL.silCss;                                                      // буквы-штрихи
+    const cw = (lw - 10*s) / 3;
+    for (let j = 0; j < 3; j++) ctx.fillRect(lx + 5*s + j * cw, by + 7*s, cw - 3*s, 10*s);
+    ctx.fillStyle = acc(0.85); ctx.fillRect(lx, Yl - 2.2*s, lw, 2.2*s);
+    return;
+  }
+  if (k === K.FLAG){
+    // флагшток: тонкая штанга, вымпел полощется у края
+    ctx.fillRect(lx, Yl, lw, 2.6 * s);
+    ctx.fillRect(side > 0 ? xw : xw - 5*s, Yl - 3*s, 5*s, 8*s);                       // пята у стены
+    const fl = Math.sin(t * 6 + i) * 4 * s, fx = xt + side * 3*s;
+    ctx.beginPath(); ctx.moveTo(fx, Yl + 3*s); ctx.lineTo(fx - side * 18*s, Yl + 10*s + fl);
+    ctx.lineTo(fx, Yl + 19*s); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = acc(0.85); ctx.fillRect(lx, Yl - 2.2*s, lw, 2.2*s);
+    return;
+  }
+  if (k === K.SPIKE){
+    // шипы от голубей: цепляться нельзя, и акцентной кромки у них нет
+    ctx.fillRect(lx, Yl, lw, lt);
+    ctx.beginPath();
+    for (let x = lx + 3*s; x < lx + lw - 2*s; x += 5*s){ ctx.moveTo(x, Yl); ctx.lineTo(x + 1.6*s, Yl - 7*s); ctx.lineTo(x + 3.2*s, Yl); }
+    ctx.closePath(); ctx.fill();
+    bracket(xw, Yl, side, lw, lt);
+    return;
+  }
+  if (k === K.BALC){
+    // балкон: плита толще, сверху перила
+    ctx.fillRect(lx, Yl, lw, lt * 1.25);
+    const rh = 17 * s;
+    ctx.fillRect(lx, Yl - rh, lw, 1.8*s);
+    for (let x = lx + 2*s; x <= lx + lw - 2*s; x += 8*s) ctx.fillRect(x, Yl - rh, 1.6*s, rh);
+    bracket(xw, Yl + lt * 0.25, side, lw, lt);
+  } else {
+    // карниз; трухлявый — с рваным низом и трещинами
+    ctx.fillRect(lx, Yl, lw, lt);
+    if (k === K.CRUMB){
+      ctx.beginPath();
+      for (let x = lx; x < lx + lw; x += 6*s){ ctx.moveTo(x, Yl + lt); ctx.lineTo(x + 3*s, Yl + lt + (3 + 3 * hash(x + i)) * s); ctx.lineTo(x + 6*s, Yl + lt); }
+      ctx.closePath(); ctx.fill();
+      ctx.fillStyle = 'rgba(255,255,255,0.10)';
+      ctx.fillRect(lx + lw * 0.3, Yl + 2*s, 1.2*s, lt - 3*s); ctx.fillRect(lx + lw * 0.64, Yl + s, 1.2*s, lt - 2*s);
+      ctx.fillStyle = PAL.silCss;
+    } else bracket(xw, Yl, side, lw, lt);
+  }
+  pigeons(i, lx, lw, Yl);
+  ctx.fillStyle = acc(0.85); ctx.fillRect(lx, Yl - 2.2*s, lw, 2.2*s);
+}
+
+function drawBirds(){
+  if (!birds.length) return;
+  ctx.fillStyle = PAL.silCss;
+  ctx.beginPath();
+  for (const b of birds){
+    const X = sx(b.x), Y = sy(b.y), s = scale, flap = Math.sin(t * 14 + b.ph) * 4 * s;
+    ctx.moveTo(X - 7*s, Y); ctx.lineTo(X, Y - 2*s - flap); ctx.lineTo(X + 7*s, Y); ctx.lineTo(X, Y + 1.2*s); ctx.closePath();
+  }
+  ctx.fill();
+}
+function drawChunks(){
+  ctx.fillStyle = PAL.silCss;
+  for (const c of chunks){
+    ctx.save(); ctx.translate(sx(c.x), sy(c.y)); ctx.rotate(c.rot);
+    ctx.fillRect(-c.w * scale / 2, -c.h * scale / 2, c.w * scale, c.h * scale); ctx.restore();
+  }
+}
+// ветер виден штрихами в шахте; длина и яркость от силы, направление от знака
+function drawWind(alt){
+  const w = windAt(alt); if (Math.abs(w) < 0.08) return;
+  ctx.strokeStyle = acc(0.22 * Math.abs(w)); ctx.lineWidth = scale;
+  ctx.beginPath();
+  for (let j = 0; j < 14; j++){
+    const h1 = hash(j * 7.7), h2 = hash(j * 3.3 + 1);
+    const y = (h1 * viewU + t * 40 * (0.5 + h2)) % viewU;
+    const L = (60 + 90 * h2) * Math.abs(w) * scale;
+    const x = sx(wrapX((h2 - 0.5) * 300 + t * 520 * w, 320));
+    ctx.moveTo(x, sy(camY + y)); ctx.lineTo(x - L * Math.sign(w), sy(camY + y));
+  }
+  ctx.stroke();
+}
+
+function drawDust(){
+  for (const d of dust){
+    ctx.fillStyle = acc(0.32 * d.life);
+    const s = 1.8 * scale * d.life;
+    ctx.fillRect(sx(d.x) - s, sy(d.y) - s, s * 2, s * 2);
+  }
+}
+
+// --- затемнение за пределами игровой колонки (альбомная / десктоп)
+function drawColumnMask(){
+  const L = sx(-HALF), R = sx(HALF);
+  if (L <= 2) return;
+  let g = ctx.createLinearGradient(L, 0, 0, 0);
+  g.addColorStop(0, sil(0)); g.addColorStop(0.45, sil(0.16)); g.addColorStop(1, sil(0.55));
+  ctx.fillStyle = g; ctx.fillRect(0, 0, L, H);
+  g = ctx.createLinearGradient(R, 0, W, 0);
+  g.addColorStop(0, sil(0)); g.addColorStop(0.45, sil(0.16)); g.addColorStop(1, sil(0.55));
+  ctx.fillStyle = g; ctx.fillRect(R, 0, W - R, H);
+}
+
+// ============================================================================
+//  КАДР
+// ============================================================================
+function draw(){
+  const alt = hero.y;
+  updatePalette(alt);
+
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, css(PAL.sky[0]));
+  g.addColorStop(0.55, css(PAL.sky[1]));
+  g.addColorStop(1, css(PAL.sky[2]));
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  if (noisePat){ ctx.fillStyle = noisePat; ctx.fillRect(0, 0, W, H); }
+
+  drawStars(alt);
+  drawMoon(alt);
+  drawSun(alt);
+
+  cloudLayer(alt, 0.30, 1400, 7000, 460, 240, 0.22, false, 5);   // высокие перистые
+  floaters(alt, 0.16, 6200, 14000, 760, 7, 3);                   // спутники
+  floaters(alt, 0.26, 2600,  5400, 700, 9, 2);                   // дирижабли
+
+  ridgeLayer(0.10, 0.26, 330, 0.0185, 1.7, true);                // дальние горы
+  ridgeLayer(0.20, 0.40, 205, 0.0098, 4.1, false);               // холмы
+  propLayer(0.34, 0.40, 62,  70, 130, [0.50, 0.80, 0.96], 0);    // дальние кварталы
+  floaters(alt, 0.42, 150, 2000, 520, 16, 0);                    // птицы
+  floaters(alt, 0.34, 900, 3400, 600, 11, 1);                    // шары
+  cloudLayer(alt, 0.55, 2200, 6200, 300, 210, 0.62, false, 9);   // облачное море
+  // тональная лестница 0.40 → 0.62 → 0.86: фоновый город обязан быть светлее
+  // зданий-платформ, иначе крыши, по которым можно прыгать, теряются в стене домов
+  propLayer(0.52, 0.62, 78,  95, 175, [0.52, 0.84, 0.94], 0);    // ближние кварталы
+  propLayer(0.82, 0.86, 104, 90, 185, [0.58, 0.86, 0.94], 1);    // передний план, с окнами
+
+  drawColumnMask();
+  drawShaft(alt);
+  drawChunks();
+  drawDust();
+  drawBirds();
+  if (state !== 'over') drawHero();
+  // Облако перед камерой: только лёгкая вуаль и редко. При alpha 0.42 платформы
+  // за ним выцветали в серое и переставали читаться — это уже вред геймплею.
+  cloudLayer(alt, 1.0, 3000, 6800, 1150, 430, 0.18, false, 26);
+
+  drawWind(alt);
+
+  // HUD: высота и рекорд, больше цифр в кадре нет.
+  // В альбомной уезжает в угол, иначе садится прямо на выступы.
+  const shown = state === 'over' ? fallAlt : Math.max(runMax, alt);
+  const txt = Math.max(0, Math.round(shown)) + ' м';
+  const wide = W / H > 1.25;
+  const fs = Math.round(22 * clamp(scale, 0.85, 1.6));
+  ctx.font = mono(600, fs);
+  ctx.textAlign = wide ? 'left' : 'center'; ctx.textBaseline = 'top';
+  const hx = wide ? 20 : W / 2, hy = 18;
+  ctx.fillStyle = sil(0.35); ctx.fillText(txt, hx + 1.5, hy + 1.5);
+  ctx.fillStyle = acc(0.95); ctx.fillText(txt, hx, hy);
+  if (best > 0){
+    ctx.font = mono(500, Math.round(fs * 0.6));
+    ctx.fillStyle = acc(0.55); ctx.fillText('рекорд ' + best + ' м', hx, hy + fs + 4);
+  }
+  if (state === 'ready') drawHint();
+  if (state === 'over') drawOver();
+}
+
+function mono(w, px){ return `${w} ${px}px ui-monospace, Consolas, monospace`; }
+function drawHint(){
+  const a = 0.6 + 0.4 * Math.sin(t * 2.5), fs = Math.round(15 * clamp(scale, 0.85, 1.6));
+  ctx.font = mono(500, fs); ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  const y = sy(hero.y) + 26 * scale;
+  ctx.fillStyle = sil(0.5); ctx.fillText('пробел или тап: прыжок', W / 2 + 1, y + 1);
+  ctx.fillStyle = acc(a); ctx.fillText('пробел или тап: прыжок', W / 2, y);
+  ctx.fillStyle = acc(0.5 * a); ctx.fillText('стрелки: подправить в полёте', W / 2, y + fs * 1.4);
+}
+function drawOver(){
+  const k = smooth(clamp(overT / 0.5, 0, 1));
+  ctx.fillStyle = sil(0.55 * k); ctx.fillRect(0, 0, W, H);
+  const pw = Math.min(W - 40, 300 * clamp(scale, 0.9, 1.5)), ph = pw * 0.62;
+  const px = W / 2 - pw / 2, py = H * 0.38 - ph / 2 + (1 - k) * 30;
+  ctx.globalAlpha = k;
+  ctx.fillStyle = sil(0.92); ctx.fillRect(px, py, pw, ph);
+  ctx.fillStyle = acc(0.85); ctx.fillRect(px, py, pw, 2.2 * scale);
+  const f1 = Math.round(pw * 0.085), f2 = Math.round(pw * 0.058);
+  ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  ctx.font = mono(600, f1); ctx.fillStyle = acc(0.95);
+  ctx.fillText('Сорвался', W / 2, py + ph * 0.12);
+  ctx.font = mono(500, f2);
+  ctx.fillText('высота ' + Math.max(0, Math.round(fallAlt)) + ' м', W / 2, py + ph * 0.40);
+  ctx.fillStyle = acc(0.6); ctx.fillText('рекорд ' + best + ' м', W / 2, py + ph * 0.56);
+  ctx.fillStyle = acc(0.55 + 0.45 * Math.sin(t * 3)); ctx.fillText('тап или пробел, ещё раз', W / 2, py + ph * 0.78);
+  ctx.globalAlpha = 1;
+}
+
+// ============================================================================
+//  ФИЗИКА
+// ============================================================================
+let keyL = false, keyR = false;
+const pointers = new Map();
+let padL = false, padR = false;
+
+// Отрыв. Без нажатой стрелки толчок идёт от своей стены в шахту, так игра
+// проходится одним пробелом, а стрелки только уточняют траекторию.
+function jump(){
+  if (lock > 0) return;
+  if (state === 'over'){ if (overT > 0.5) restart(); return; }
+  if (hero.hang < 0) return;
+  const i = hero.hang, k = ledgeKind(i);
+  if (state === 'ready'){ state = 'play'; try { SFX.music.start('dawn', 0.3); } catch (e) {} }
+  hero.vy = JUMP * (k === K.AWN ? 1.32 : 1);            // маркиза подбрасывает выше
+  const manual = (keyL || padL) ? -1 : (keyR || padR) ? 1 : 0;
+  if (manual){
+    hero.vx = manual * KICK * (k === K.FLAG ? 1.7 : 1);  // флагшток даёт раскачку вбок
+  } else {
+    // Автоприцел: толчок ровно такой, чтобы к моменту спуска кистей до кромки
+    // ближайшего достижимого выступа выше оказаться над его внешней половиной.
+    // Учитывает сопротивление воздуха, но НЕ ветер, качку люльки и осыпание:
+    // это и остаётся на долю игрока и стрелок.
+    const y0 = ledgeY(i), apex = hero.vy * hero.vy / (2 * GRAV);
+    const kd = -Math.log(AIRDRAG), v = hero.vy;
+    let best = null;
+    for (let j = i + 1; j <= i + 4; j++){
+      const dy = ledgeY(j) - y0;
+      if (dy > apex - 6) break;
+      if (!canGrab(j)) continue;
+      const tf = (v + Math.sqrt(Math.max(0, v * v - 2 * GRAV * dy))) / GRAV;
+      const tx = ledgeTip(j) + ledgeSide(j) * Math.abs(ledgeOut(j) - ledgeTip(j)) * 0.25;
+      const need = (tx - hero.x) * kd / (1 - Math.exp(-kd * tf));
+      if (Math.abs(need) <= VMAX){ best = need; break; }   // ближайший, до которого долетаем
+    }
+    hero.vx = best === null ? -ledgeSide(i) * KICK : best;
+  }
+  const dir = Math.sign(hero.vx) || -ledgeSide(i);
+  hero.face = dir;
+  for (let q = 0; q < 5; q++)
+    dust.push({ x: hero.x + (hash(t * 97 + q) - 0.5) * 26, y: hero.y + HANDY,
+                vx: (hash(t * 31 + q) - 0.5) * 80, vy: -20 - hash(t * 53 + q) * 60, life: 1 });
+  hero.hang = -1;
+  crumble.delete(i);
+  S(k === K.AWN ? 'bubble' : 'whoosh', { v: 0.6 });
+}
+
+function breakLedge(i){
+  broken.add(i); crumble.delete(i);
+  const lo = Math.min(ledgeOut(i), ledgeTip(i)), hi = Math.max(ledgeOut(i), ledgeTip(i)), y = ledgeY(i);
+  for (let q = 0; q < 9; q++)
+    chunks.push({ x: lerp(lo, hi, hash(i * 3 + q)), y: y - 4, vx: (hash(q * 7 + i) - 0.5) * 120, vy: -40 - hash(q * 5) * 80,
+                  w: 6 + hash(q * 9) * 9, h: 4 + hash(q * 11) * 5, rot: hash(q) * 6, vr: (hash(q * 13) - 0.5) * 8, life: 1 });
+  if (hero.hang === i){ hero.hang = -1; hero.vy = 0; hero.vx = 0; }
+  S('brk', { v: 0.7 });
+}
+
+function onGrab(i){
+  const k = ledgeKind(i);
+  hero.hang = i; hero.vx = 0; hero.vy = 0; hero.catch = 1;
+  hero.hx = hero.x - ledgeDX(i);
+  if (k === K.CRUMB){ crumble.set(i, crumbleTime(i)); S('drop', { v: 0.5 }); }
+  else S(k === K.SIGN || k === K.GOND ? 'clang' : 'thud', { v: k === K.SIGN ? 0.35 : 0.5 });
+  if (hasPigeons(i)){
+    scattered.add(i);
+    const n = 1 + Math.floor(hash(i * 2.2) * 3);
+    for (let q = 0; q < n; q++)
+      birds.push({ x: hero.x + (hash(q * 4 + i) - 0.5) * 30, y: ledgeY(i) + 6,
+                   vx: (hash(q * 6 + i) - 0.5) * 260 - ledgeSide(i) * 120, vy: 160 + hash(q * 8) * 120, ph: q * 1.7, life: 2.6 });
+    S('leaves', { v: 0.4 });
+  }
+}
+
+function gameOver(){
+  state = 'over'; overT = 0; fallAlt = runMax;
+  if (Math.round(runMax) > best){ best = Math.round(runMax); try { localStorage.setItem('sunrise_best', best); } catch (e) {} }
+  S('fail', { v: 0.6 });
+  try { SFX.music.set(0.12); } catch (e) {}
+}
+function restart(){
+  broken.clear(); crumble.clear(); scattered.clear();
+  dust.length = chunks.length = birds.length = trail.length = 0;
+  camY = 0; runMax = 0; state = 'ready'; overT = 0; lock = 0.35;
+  grabAt(0);
+}
+
+function update(dt){
+  t += dt;
+  lock = Math.max(0, lock - dt);
+  hero.catch = Math.max(0, hero.catch - dt * 4.5);
+
+  if (state === 'over'){
+    overT += dt;                             // замерли, доживают только частицы
+  } else if (hero.hang >= 0){                // висим: ждём пробела, физики нет
+    hero.prevY = hero.y;
+    trail.length = 0;
+    const i = hero.hang;
+    hero.x = hero.hx + ledgeDX(i);           // люлька уносит с собой
+    if (crumble.has(i)){
+      const left = crumble.get(i) - dt;
+      if (left <= 0) breakLedge(i); else crumble.set(i, left);
+    }
+  } else {
+    let ax = 0;
+    if (keyL || padL) ax -= 1;
+    if (keyR || padR) ax += 1;
+    hero.vx += ax * ACC * dt;
+    hero.vx += windAt(hero.y) * 320 * dt;
+    // одно затухание с руками и без: при 0.06 полёт без стрелок гас так, что через
+    // шахту на флагшток было не долететь даже на максимальной скорости
+    hero.vx *= Math.pow(AIRDRAG, dt);
+    hero.vx = clamp(hero.vx, -VMAX, VMAX);
+    if (Math.abs(hero.vx) > 20) hero.face = hero.vx > 0 ? 1 : -1;
+
+    hero.prevY = hero.y;
+    hero.vy -= GRAV * dt;
+    hero.y  += hero.vy * dt;
+    hero.x  += hero.vx * dt;
+    runMax = Math.max(runMax, hero.y);
+
+    // стены шахты — жёсткие границы, заворачивания по краям нет
+    const lim = WALL - HW * 0.45;
+    if (hero.x >  lim){ hero.x =  lim; hero.vx = Math.min(0, hero.vx); }
+    if (hero.x < -lim){ hero.x = -lim; hero.vx = Math.max(0, hero.vx); }
+
+    // захват: только на падении и только когда кисти проходят кромку сверху вниз
+    if (hero.vy < 0){
+      const hPrev = hero.prevY + HANDY, hNow = hero.y + HANDY;
+      const iA = Math.max(0, Math.floor((hNow - 160 - Y0) / STEP));
+      const iB = Math.ceil((hPrev + 60 - Y0) / STEP);
+      for (let i = iA; i <= iB; i++){
+        const ly = ledgeY(i);
+        if (hPrev < ly - 1 || hNow > ly || !canGrab(i)) continue;
+        const side = ledgeSide(i), a = ledgeOut(i), b = ledgeTip(i);
+        const lo = Math.min(a, b) - 9, hiX = Math.max(a, b) + 9;
+        if (hero.x < lo || hero.x > hiX) continue;
+        hero.y = ly - HANDY;
+        // висим на внешней половине выступа: там за спиной небо, а не стена
+        hero.x = side > 0 ? clamp(hero.x, b, b + (a - b) * 0.5) : clamp(hero.x, b - (b - a) * 0.5, b);
+        hero.face = -side;
+        onGrab(i);
+        for (let q = 0; q < 4; q++)
+          dust.push({ x: hero.x + (hash(t * 41 + q) - 0.5) * 22, y: ly - 3,
+                      vx: (hash(t * 67 + q) - 0.5) * 60, vy: -30 - hash(t * 23 + q) * 40, life: 1 });
+        break;
+      }
+    }
+  }
+
+  for (let i = dust.length - 1; i >= 0; i--){
+    const d = dust[i];
+    d.x += d.vx * dt; d.y += d.vy * dt; d.vy -= 260 * dt; d.life -= dt * 2.4;
+    if (d.life <= 0) dust.splice(i, 1);
+  }
+  for (let i = chunks.length - 1; i >= 0; i--){
+    const c = chunks[i];
+    c.x += c.vx * dt; c.y += c.vy * dt; c.vy -= GRAV * 0.6 * dt; c.rot += c.vr * dt; c.life -= dt * 0.6;
+    if (c.life <= 0 || c.y < camY - 200) chunks.splice(i, 1);
+  }
+  for (let i = birds.length - 1; i >= 0; i--){
+    const b = birds[i];
+    b.x += b.vx * dt; b.y += b.vy * dt; b.vy *= Math.pow(0.5, dt); b.life -= dt;
+    if (b.life <= 0) birds.splice(i, 1);
+  }
+
+  if (hero.hang < 0 && state !== 'over'){
+    trail.push({ x: hero.x, y: hero.y });
+    if (trail.length > 6) trail.shift();
+  }
+
+  // камера: догоняет вверх и никогда не опускается
+  const target = Math.max(0, hero.y - viewU * 0.42);
+  if (target > camY) camY += (target - camY) * Math.min(1, dt * 9);
+
+  if (state !== 'over' && hero.y < camY - 140) gameOver();
+
+  if (state === 'play'){                     // музыка набирает силу с высотой, эмбиент по фазе
+    musicT += dt;
+    if (musicT > 0.5){
+      musicT = 0;
+      try { SFX.music.set(0.3 + 0.6 * clamp(hero.y / 9000, 0, 1)); } catch (e) {}
+      const want = hero.y > 4500 ? 'wind' : 'night';
+      if (want !== ambName){ ambName = want; try { SFX.amb.start(want); } catch (e) {} }
+    }
+  }
+}
+
+// Повесить героя на ближайший к высоте a выступ, за который можно взяться.
+function grabAt(a){
+  let i = Math.max(0, Math.round((a - Y0) / STEP));
+  while (i > 0 && !canGrab(i)) i--;
+  hero.hang = i;
+  hero.y = ledgeY(i) - HANDY;
+  hero.x = ledgeTip(i) + ledgeSide(i) * ledgeLen(i) * 0.25;
+  hero.hx = hero.x - ledgeDX(i);
+  hero.vx = 0; hero.vy = 0; hero.catch = 0; hero.face = -ledgeSide(i);
+  trail.length = 0;
+}
+
+// ============================================================================
+//  ВВОД
+// ============================================================================
+function syncPads(){
+  padL = padR = false;
+  for (const x of pointers.values()){ if (x < W / 2) padL = true; else padR = true; }
+}
+// Касание = прыжок, а удержание после него рулит той половиной экрана, где палец.
+// На телефоне пробела нет, а разводить прыжок и руление по разным зонам —
+// значит отдать пол-экрана под кнопку.
+cvs.addEventListener('pointerdown', e => {
+  pointers.set(e.pointerId, e.clientX); syncPads(); cvs.setPointerCapture(e.pointerId);
+  try { SFX.unlock(); } catch (err) {}
+  jump();
+});
+cvs.addEventListener('pointermove', e => { if (pointers.has(e.pointerId)){ pointers.set(e.pointerId, e.clientX); syncPads(); } });
+const up = e => { pointers.delete(e.pointerId); syncPads(); };
+cvs.addEventListener('pointerup', up);
+cvs.addEventListener('pointercancel', up);
+addEventListener('keydown', e => {
+  if (e.code === 'ArrowLeft'  || e.code === 'KeyA') keyL = true;
+  if (e.code === 'ArrowRight' || e.code === 'KeyD') keyR = true;
+  if (e.code === 'Space' || e.code === 'ArrowUp' || e.code === 'KeyW'){ e.preventDefault(); try { SFX.unlock(); } catch (err) {} jump(); }
+  if (e.code === 'KeyR') restart();
+});
+addEventListener('keyup', e => {
+  if (e.code === 'ArrowLeft'  || e.code === 'KeyA') keyL = false;
+  if (e.code === 'ArrowRight' || e.code === 'KeyD') keyR = false;
+});
+addEventListener('contextmenu', e => e.preventDefault());
+
+// --------------------------------------------------- отладка: прыжок по фазам
+const NAMES = ['ночь','первый свет','рассвет','утро','облака','стратосфера','космос'];
+const dev = document.getElementById('dev');
+PHASES.forEach((p, i) => {
+  const b = document.createElement('button');
+  b.textContent = `${i+1}. ${NAMES[i]} · ${p.a}м`;
+  b.onclick = () => teleport(p.a);
+  dev.appendChild(b);
+});
+function teleport(a){
+  grabAt(a);
+  camY = Math.max(0, hero.y - viewU * 0.42);
+  runMax = hero.y; state = 'play'; overT = 0;
+}
+addEventListener('keydown', e => {
+  const n = e.key && e.key.length === 1 ? '1234567'.indexOf(e.key) : -1;
+  if (n >= 0) teleport(PHASES[n].a);
+});
+document.getElementById('devtog').onclick = () => dev.classList.toggle('hidden');
+// Ручной прогон кадров: в скрытой панели браузера rAF/setInterval душатся до
+// одного тика в минуту, и снять кадр обычным способом невозможно.
+window.__step = (sec = 0) => { const n = Math.round(sec / DT); for (let i = 0; i < n; i++) update(DT); draw(); return t; };
+window.__jump = jump;
+window.__restart = restart;
+window.__tp = a => teleport(a);
+window.__kind = i => ledgeKind(i);
+window.__ledge = i => ({ y: +ledgeY(i).toFixed(1), side: ledgeSide(i), tip: +ledgeTip(i).toFixed(1), out: +ledgeOut(i).toFixed(1), kind: ledgeKind(i), can: canGrab(i) });
+window.__dbg = () => ({ t: +t.toFixed(2), frames, x: +hero.x.toFixed(1), y: +hero.y.toFixed(1), vy: +hero.vy.toFixed(0), hang: hero.hang, kind: hero.hang >= 0 ? ledgeKind(hero.hang) : -1, state, camY: +camY.toFixed(0), scale: +scale.toFixed(3), viewU: +viewU.toFixed(0) });
+
+// ============================================================================
+//  ЦИКЛ
+// ============================================================================
+const DT = 1 / 120;
+let last = 0, accum = 0, frames = 0;
+function frame(ts){
+  frames++;
+  if (!last) last = ts;
+  accum += Math.min(0.25, (ts - last) / 1000);
+  last = ts;
+  while (accum >= DT){ update(DT); accum -= DT; }
+  draw();
+  requestAnimationFrame(frame);
+}
+resize();
+makeNoise();
+restart();
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

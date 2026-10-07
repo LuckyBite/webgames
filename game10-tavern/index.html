@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Таверна у края Хмари</title>
+<!--
+  Тезис арт-дирекции: таверна — последний тёплый огонь на дороге; весь свет в кадре идёт
+  от очага и ламп, а всё, куда он не дотягивается, принадлежит холодной Хмари.
+  Право на акцент — у готовой еды. Спека: docs/superpowers/specs/2026-09-27-tavern-design.md
+-->
+<style>
+  html, body { margin: 0; height: 100%; background: #120b07; overflow: hidden; overscroll-behavior: none; }
+  body { touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
+  canvas { position: fixed; inset: 0; display: block; }
+  #report, #menu, #nomodule { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+    background: rgba(10, 6, 4, 0.72); font-family: "Segoe UI", Roboto, system-ui, sans-serif; color: #efe2c4; }
+  #report[hidden], #menu[hidden], #nomodule[hidden] { display: none; }
+  .card { background: #efe2c4; color: #3a2414; border-radius: 14px; padding: 20px 24px;
+    min-width: 240px; max-width: min(360px, 86vw); box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5); }
+  .card h2 { margin: 0 0 12px; font-size: 22px; }
+  .card .row { display: flex; justify-content: space-between; gap: 16px; font-size: 16px; line-height: 1.8; }
+  .card .note { margin: 12px 0 0; font-size: 15px; line-height: 1.45; }
+  .card button { margin-top: 16px; width: 100%; min-height: 48px; font-size: 18px; border: 0;
+    border-radius: 10px; background: #8a3f1e; color: #fff4e0; cursor: pointer; }
+  .card button.alt { margin-top: 10px; background: #5a3a24; }
+  /* отладка — только на локальном сервере или с ?debug=1, в релиз не попадает */
+  .card .dbg { margin: 16px 0 0; font-size: 13px; color: #8a6a3a; text-transform: uppercase; letter-spacing: 0.08em; }
+  .card #debug button { min-height: 44px; font-size: 16px; background: #3a4a3a; }
+  /* отчёт пира с советом Жара выше обычного — на низком альбоме карточка ужимается и листается */
+  .card { max-height: calc(100vh - 16px); overflow-y: auto; box-sizing: border-box; }
+  @media (max-height: 460px) {
+    .card { padding: 12px 20px; }
+    .card h2 { margin-bottom: 6px; font-size: 20px; }
+    .card .row { line-height: 1.5; }
+    .card .note { margin-top: 8px; }
+    .card button { margin-top: 10px; min-height: 44px; }
+  }
+  /* отчёт конца смены (report.js): строки выезжают по очереди, звёзды выпрыгивают, кнопки
+     прилипают к низу карточки — «Дальше» видно, даже если отчёт листается */
+  .rep { padding-bottom: 0; }
+  .rep [hidden] { display: none !important; }
+  .rep h2 { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 4px 12px; }
+  .rep-stars { display: inline-flex; gap: 2px; font-size: 28px; line-height: 1; white-space: nowrap; }
+  .rep-stars i { font-style: normal; display: inline-block; }
+  .rep-stars .on { color: #e0a020; text-shadow: 0 1px 0 #8a5a10; animation: rep-star 0.45s cubic-bezier(.3, 1.6, .5, 1) both;
+    animation-delay: calc(250ms + var(--s) * 220ms); }
+  .rep-stars .off { color: #cdbb94; }
+  .rep-pop { animation: rep-in 0.3s ease-out both; animation-delay: calc(var(--i) * 70ms); }
+  .rep .row b { font-variant-numeric: tabular-nums; text-align: right; }
+  .rep .row span { min-width: 0; }
+  .rep-plate { margin: 8px 0 0; padding: 6px 10px; border-radius: 8px; background: #d9e8c4; color: #2f4a1e;
+    font-weight: 600; font-size: 15px; text-align: center; }
+  .rep-gold { background: #ffd166; color: #5a3a10; }
+  .rep-cmp { margin: 8px 0 0; font-size: 15px; }
+  .rep-dir { font-style: normal; }
+  .rep-up { color: #3f7a2a; } .rep-down { color: #a8402a; }
+  .rep-net { margin: 10px 0 0; padding: 8px 12px; border-radius: 10px; background: #3a2414; color: #ffd166;
+    display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; }
+  .rep-net span { font-size: 18px; color: #efe2c4; }
+  .rep-net b { font-size: 30px; font-variant-numeric: tabular-nums; line-height: 1.15; }
+  .rep-net small { flex-basis: 100%; font-size: 13px; color: #cdbb94; }
+  .rep-fame { margin: 10px 0 0; font-size: 15px; }
+  .rep-bar { margin-top: 4px; height: 10px; border-radius: 5px; background: #d6c49c; overflow: hidden; }
+  .rep-bar i { display: block; height: 100%; background: #8a3f1e; border-radius: 5px; }
+  .rep-teaser { margin: 10px 0 0; font-size: 15px; line-height: 1.4; }
+  .rep-btns { position: sticky; bottom: 0; margin: 0 -24px; padding: 2px 24px 16px; background: #efe2c4; }
+  .rep-btns #double { animation: rep-in 0.3s ease-out both; }
+  .rep button { font-family: inherit; font-weight: 600; }
+  @keyframes rep-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+  @keyframes rep-star { 0% { opacity: 0; transform: scale(0.2) rotate(-30deg); } 100% { opacity: 1; transform: none; } }
+  @media (max-width: 360px) {
+    .card.rep { padding-left: 16px; padding-right: 16px; max-width: calc(100vw - 20px); }
+    .rep button { font-size: 16px; }
+    .rep-btns { margin: 0 -16px; padding-left: 16px; padding-right: 16px; }
+    .rep .row { font-size: 15px; gap: 10px; }
+  }
+  /* низкий альбом: две колонки — цифры слева, касса и завтра справа */
+  @media (max-height: 460px) and (min-width: 560px) {
+    .card.rep { max-width: min(680px, 92vw); width: 680px; }
+    .rep-body { display: grid; grid-template-columns: 1fr 1fr; gap: 0 22px; align-items: start; }
+    .rep .row { font-size: 15px; }
+    .rep-net b { font-size: 26px; }
+    .rep-side > :first-child { margin-top: 0; }
+  }
+  @media (max-height: 460px) {
+    .rep-btns { margin: 0 -20px; padding: 0 20px 10px; display: flex; gap: 10px; }
+    .rep-btns button { margin-top: 8px; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .rep-pop, .rep-stars .on, .rep-btns #double { animation: none; }
+  }
+</style>
+</head>
+<body oncontextmenu="return false">
+<canvas id="game"></canvas>
+<div id="report" hidden></div>
+<div id="menu" hidden><div class="card"><h2>Пауза</h2><button id="resume">Продолжить</button><button id="sound" class="alt">Звук: вкл</button><div id="debug" hidden><p class="dbg">Отладка</p><button id="dbg-team" class="alt">Вся команда</button><button id="dbg-coins" class="alt">+500 монет</button><button id="dbg-fame" class="alt">+50 славы</button></div></div></div>
+<div id="nomodule" hidden>Откройте через сервер: node serve.js 8784 → http://localhost:8784/game10-tavern/</div>
+<!-- /sdk.js отдаёт платформа Яндекса; локально его нет (404 в сети, не ошибка), и обёртка
+     shared/ysdk.js уходит в мок-режим: награда сразу, рекламы и облака нет. -->
+<!-- sdk.js: только для Яндекс Игр -->
+<script src="../shared/ysdk.js"></script>
+<script src="../shared/sfx.js"></script>
+<script type="module" src="main.js"></script>
+<script>setTimeout(() => { if (!window.game) document.getElementById('nomodule').hidden = false; }, 1500);</script>
+</body>
+</html>

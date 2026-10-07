@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Подземелье Некроманта</title>
+<!-- Шрифт локальный (OFL, vendor/fonts): запрос к Google Fonts из игры на платформе не нужен -->
+<link rel="preload" href="vendor/fonts/pixelify-cyrillic.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="style.css">
+<!-- SDK платформы. Локально файла нет — обёртка ysdk.js уходит в мок-режим сама,
+     и это не ошибка сборки: в архив для Яндекса тег остаётся как есть. -->
+<!-- sdk.js: только для Яндекс Игр -->
+<script src="vendor/sfx.js"></script>
+<script type="importmap">
+{ "imports": { "three": "./vendor/three.module.min.js" } }
+</script>
+</head>
+<body>
+<canvas id="scene"></canvas>
+
+<!-- Экран загрузки: висит до gameReady, чтобы порядок п. 1.19 был честным -->
+<div id="loading">
+  <div class="load-title" data-i18n="title">Подземелье Некроманта</div>
+  <div class="load-sub" data-i18n="loading">Подземелье углубляется…</div>
+</div>
+
+<div id="ui">
+  <header id="hud">
+    <div class="hud-left">
+      <div class="portrait mini"><canvas id="necro-face"></canvas></div>
+      <div class="hud-stats">
+        <!-- Номер партии оставлен цифрой рядом с ярусом: полоса засечек показывает
+             структуру рейда, но «сколько ещё» быстрее читается числом -->
+        <span class="tier"><span data-i18n="tier">Ярус</span> <b id="tier">1</b>
+          · <b id="party">1</b>/10</span>
+        <span id="raid-track" class="raid-track"></span>
+      </div>
+    </div>
+    <div class="hud-right">
+      <div id="remains-hud" class="remains-hud"></div>
+      <span id="essence-chip" class="essence hidden" data-i18n-title="essenceTip">✦ <b>0</b></span>
+      <button id="btn-help" class="hud-btn help-btn" data-i18n="helpBtn">?</button>
+      <button id="btn-mute" class="hud-btn">звук ♪</button>
+    </div>
+  </header>
+
+  <div id="banner" class="banner hidden"></div>
+  <div id="hint" class="hint hidden"></div>
+  <button id="offer" class="offer hidden"></button>
+
+  <section id="panel">
+    <div class="block army-block">
+      <h2 data-i18n="army">Армия</h2>
+      <div id="army" class="army"></div>
+    </div>
+
+    <!-- Блок заклинаний: в портрете это нижняя полоса, в альбоме — часть колонки -->
+    <div class="block spell-block">
+      <div id="spells" class="spells"></div>
+      <div class="spell-row">
+        <button id="btn-sheet" class="mini-btn wide" data-icon="circle"><span data-i18n="ritualBtn">Ритуал</span></button>
+        <button id="ad-recharge" class="mini-btn ad hidden" data-i18n="adRecharge">Перезарядить (реклама)</button>
+      </div>
+    </div>
+
+    <!-- Ритуал и мета. В портрете уезжает в выдвижной лист: постоянно раскрытым он
+         съедал 60% экрана и прятал под собой сам бой (замер: геймплей 4.9% на 360×640). -->
+    <div id="ritual-sheet" class="block ritual-block">
+      <div class="sheet-head">
+        <h2 data-i18n="circle">Ритуальный круг</h2>
+        <button id="sheet-close" class="mini-btn sheet-only" data-i18n="close">Закрыть</button>
+      </div>
+      <div id="circle" class="circle"></div>
+      <div class="ritual-actions">
+        <button id="auto-fill" class="mini-btn" data-icon="auto" data-i18n-title="autoFillTip"><span data-i18n="autoFill">Разложить</span></button>
+        <button id="batch10" class="mini-btn" data-i18n="batch" data-i18n-title="batchTip">Ритуал ×10</button>
+        <button id="ad-slot" class="mini-btn ad hidden" data-i18n="adSlot">+слот на ритуал (реклама)</button>
+      </div>
+      <button id="raise" class="raise" disabled data-i18n="raise">Поднять</button>
+      <div id="stock" class="stock"></div>
+      <!-- Казарма: все поднятые разом, тап ставит в строй или убирает. Раньше состав
+           менялся из окна, которое открывалось только по тапу в слот. -->
+      <div id="barracks-block" class="barracks-block">
+        <div class="sheet-head"><h2 data-i18n="barracks">Казарма</h2><small data-i18n="barracksHint">тап ставит в строй или убирает</small></div>
+        <div id="barracks" class="barracks"></div>
+      </div>
+      <div class="caster-links">
+        <button id="btn-grimoire" class="mini-btn" data-icon="book"><span data-i18n="grimoire">Гримуар</span></button>
+        <button id="btn-crypt" class="mini-btn" data-icon="crypt"><span data-i18n="cryptBtn">Склеп</span></button>
+        <button id="btn-lich" class="mini-btn lich hidden" data-icon="lich" data-i18n-title="lichTip"><span data-i18n="lich">Ритуал лича</span></button>
+      </div>
+    </div>
+  </section>
+</div>
+
+<!-- Вступление: три коротких экрана при первом запуске, бой на паузе. Говорит череп
+     из шапки, тот же, что потом реагирует на игру -->
+<div id="intro" class="picker hidden">
+  <div class="picker-inner intro-inner">
+    <div id="intro-art" class="intro-art"></div>
+    <h2 id="intro-title"></h2>
+    <p id="intro-text" class="intro-text"></p>
+    <div id="intro-dots" class="intro-dots"></div>
+    <div class="intro-actions">
+      <button id="intro-skip" class="mini-btn"></button>
+      <button id="intro-next" class="raise"></button>
+    </div>
+  </div>
+</div>
+
+<!-- Справочник: что это за игра и что делает каждая кнопка -->
+<div id="help" class="picker hidden">
+  <div class="picker-inner help-inner">
+    <h2 data-i18n="helpTitle">Как играть</h2>
+    <div id="help-body" class="help-body"></div>
+    <button id="help-close" class="raise ghost" data-i18n="close">Закрыть</button>
+  </div>
+</div>
+
+<!-- Выбор карточки после 5-й и 10-й партии: три карточки, бой стоит -->
+<div id="cards" class="picker hidden">
+  <div class="picker-inner cards-inner">
+    <h2 id="cards-title"></h2>
+    <div id="cards-list" class="cards-list"></div>
+    <button id="cards-back" class="mini-btn hidden"></button>
+  </div>
+</div>
+
+<!-- Склеп: облик некроманта и подземелья. Вещи открываются рекламой или достижением -->
+<div id="crypt" class="picker hidden">
+  <div class="picker-inner crypt-inner">
+    <h2 data-i18n="cryptTitle">Склеп</h2>
+    <div id="crypt-tabs" class="crypt-tabs"></div>
+    <div id="crypt-list" class="crypt-list"></div>
+    <button id="crypt-close" class="raise ghost" data-i18n="close">Закрыть</button>
+  </div>
+</div>
+
+<div id="grimoire" class="picker hidden">
+  <div class="picker-inner">
+    <h2><span data-i18n="grimEssence">Гримуар · эссенция:</span> <b id="grim-essence">0</b></h2>
+    <div id="grimoire-list" class="grimoire-list"></div>
+    <button id="grimoire-close" class="raise" data-i18n="close">Закрыть</button>
+  </div>
+</div>
+
+<div id="lich" class="picker hidden">
+  <div class="picker-inner">
+    <h2 data-i18n="lich">Ритуал лича</h2>
+    <p id="lich-text" class="lich-text"></p>
+    <div class="lich-actions">
+      <button id="lich-confirm" class="raise" data-i18n="lichConfirm">Свершить</button>
+      <button id="lich-x2" class="raise" data-i18n="lichX2">Свершить ×2 (реклама)</button>
+      <button id="lich-cancel" class="raise ghost" data-i18n="lichCancel">Не сейчас</button>
+    </div>
+  </div>
+</div>
+
+<script type="module" src="main.js"></script>
+</body>
+</html>

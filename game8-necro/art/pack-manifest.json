@@ -1,0 +1,58 @@
+{
+  "_": "Что встраивается в art/pack.js. Сборка: node game8-necro/tools/build-art-pack.js. floor/wall — семейства DCSS (все варианты), остальное — отдельные тайлы. Пути относительно rltiles/.",
+  "floor": [
+    "crypt",
+    "necro_squares"
+  ],
+  "wall": [
+    "crypt",
+    "catacombs",
+    "rock_wall_crypt",
+    "brick_dark_1",
+    "brick_dark_3",
+    "brick_dark_5"
+  ],
+  "decor": {
+    "column": "dngn/statues/crumbled_column_1",
+    "columnBroken": "dngn/statues/crumbled_column_3",
+    "wraith": "dngn/statues/statue_wraith",
+    "evil": "dngn/statues/statue_ancient_evil",
+    "lichStatue": "dngn/statues/statue_depths_zot_lich",
+    "demonBust": "dngn/statues/statue_demonic_bust",
+    "bloodFountain": "dngn/decor/blood_fountain",
+    "dryFountain": "dngn/decor/dry_fountain"
+  },
+  "necro": {
+    "occultist": "mon/humanoids/humans/occultist",
+    "acolyte": "mon/humanoids/humans/burial_acolyte",
+    "arcanist": "mon/humanoids/humans/arcanist",
+    "deathKnight": "mon/humanoids/humans/death_knight",
+    "vampireMage": "mon/undead/vampire_mage",
+    "lichKing": "mon/unique/boris"
+  },
+  "face": {
+    "curse": "mon/undead/curse_skull",
+    "laugh": "mon/undead/laughing_skull",
+    "weep": "mon/undead/weeping_skull"
+  },
+  "base": {
+    "floor": [
+      "crypt"
+    ],
+    "wall": [
+      "crypt"
+    ],
+    "decor": [
+      "column",
+      "columnBroken"
+    ],
+    "necro": [
+      "occultist"
+    ],
+    "face": [
+      "curse",
+      "laugh",
+      "weep"
+    ]
+  }
+}

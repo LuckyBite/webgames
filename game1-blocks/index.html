@@ -1,0 +1,604 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Блоки: Собери Линии</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body {
+    height: 100%; overflow: hidden; background: #151726;
+    /* п.1.10.2: без swipe-to-refresh и bounce-скролла, без iOS-меню по долгому тапу */
+    overscroll-behavior: none; touch-action: none; -webkit-touch-callout: none;
+  }
+  body { font-family: 'Segoe UI', Roboto, Arial, sans-serif; user-select: none; -webkit-user-select: none; }
+  #game { position: fixed; inset: 0; touch-action: none; display: block; }
+  .modal {
+    position: fixed; inset: 0; display: none; align-items: center; justify-content: center;
+    background: rgba(10, 12, 24, .75); z-index: 10; backdrop-filter: blur(4px);
+  }
+  .modal.show { display: flex; }
+  .panel {
+    background: #232640; border-radius: 20px; padding: 28px 32px; text-align: center;
+    color: #fff; box-shadow: 0 12px 40px rgba(0,0,0,.5); max-width: 320px; width: 86%;
+    animation: pop .25s ease-out;
+  }
+  @keyframes pop { from { transform: scale(.8); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+  .panel h2 { font-size: 26px; margin-bottom: 6px; }
+  .panel .sc { font-size: 44px; font-weight: 800; color: #ffd54a; margin: 8px 0 2px; }
+  .panel .bs { font-size: 15px; color: #9aa0c3; margin-bottom: 18px; }
+  .btn {
+    display: block; width: 100%; min-height: 48px; border: 0; border-radius: 14px; padding: 14px 18px;
+    font-size: 17px; font-weight: 700; cursor: pointer; margin-top: 10px; color: #fff;
+    transition: transform .1s;
+  }
+  .btn:active { transform: scale(.96); }
+  .btn-green { background: linear-gradient(180deg, #4cd964, #2fae4a); }
+  .btn-blue  { background: linear-gradient(180deg, #5a9cff, #3a6fe0); }
+  .btn small { display: block; font-weight: 400; font-size: 12px; opacity: .85; }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+
+<div class="modal" id="overModal">
+  <div class="panel">
+    <h2 id="overTitle">Игра окончена</h2>
+    <div class="sc" id="overScore">0</div>
+    <div class="bs" id="overBest">Рекорд: 0</div>
+    <button class="btn btn-green" id="btnRevive">🎬 Продолжить<small>посмотреть рекламу — очистим центр поля</small></button>
+    <button class="btn btn-blue" id="btnRestart">Заново</button>
+  </div>
+</div>
+
+<!-- sdk.js: только для Яндекс Игр -->
+<script>
+/* ===== Обёртка Yandex SDK (мок-режим локально) ===== */
+const YSDK = (() => {
+  let ysdk = null, player = null, readySent = false;
+  function fireReady() {
+    if (readySent) return;
+    // флаг ставим только когда ready() реально ушёл: иначе преждевременный вызов
+    // (например, из фолбэка по таймеру, пока SDK ещё не ответил) сжёг бы сигнал п.1.19
+    try {
+      if (ysdk && ysdk.features && ysdk.features.LoadingAPI) { ysdk.features.LoadingAPI.ready(); readySent = true; }
+    } catch (e) { readySent = true; }
+  }
+  async function init() {
+    if (typeof YaGames === 'undefined') return;
+    try {
+      ysdk = await Promise.race([YaGames.init(), new Promise((_, rej) => setTimeout(() => rej(0), 8000))]);
+    } catch (e) { ysdk = null; }
+    if (ysdk) {
+      try { player = await Promise.race([ysdk.getPlayer(), new Promise(r => setTimeout(() => r(null), 3000))]); }
+      catch (e) { player = null; }
+    }
+  }
+  // п.4.7: пауза и глушение звука ровно на время показа рекламы
+  function pauseForAd() {
+    try { Sound.setMuted(true); } catch (e) {}
+    try { ysdk && ysdk.features && ysdk.features.GameplayAPI && ysdk.features.GameplayAPI.stop(); } catch (e) {}
+  }
+  return {
+    init,
+    get lang() { try { return ysdk ? ysdk.environment.i18n.lang : (navigator.language || 'ru').slice(0, 2); } catch (e) { return 'ru'; } },
+    gameReady: fireReady,
+    gameplayStart() { ysdk?.features?.GameplayAPI?.start(); },
+    gameplayStop() { ysdk?.features?.GameplayAPI?.stop(); },
+    showInterstitial(onClose) {
+      if (!ysdk) { onClose?.(); return; }
+      this.gameplayStop();
+      Sound.setMuted(true);
+      ysdk.adv.showFullscreenAdv({ callbacks: {
+        onOpen: () => { Sound.suspend(); pauseForAd(); },
+        onClose: () => { Sound.resume(); Sound.setMuted(false); onClose?.(); },
+        onError: () => { Sound.resume(); Sound.setMuted(false); onClose?.(); },
+      }});
+    },
+    showRewarded(onReward, onClose) {
+      if (!ysdk) { onReward?.(); onClose?.(true); return; }
+      this.gameplayStop();
+      Sound.setMuted(true);
+      let ok = false;
+      ysdk.adv.showRewardedVideo({ callbacks: {
+        onOpen: () => { Sound.suspend(); pauseForAd(); },
+        onRewarded: () => { ok = true; onReward?.(); },
+        onClose: () => { Sound.resume(); Sound.setMuted(false); onClose?.(ok); },
+        onError: () => { Sound.resume(); Sound.setMuted(false); onClose?.(false); },
+      }});
+    },
+    async saveData(obj) {
+      if (player) { try { await player.setData(obj); return; } catch (e) {} }
+      try { localStorage.setItem('blocks_save', JSON.stringify(obj)); } catch (e) {}
+    },
+    async loadData() {
+      if (player) { try { const d = await player.getData(); if (d && Object.keys(d).length) return d; } catch (e) {} }
+      try { return JSON.parse(localStorage.getItem('blocks_save')) || {}; } catch (e) { return {}; }
+    },
+    setScore(score) {
+      if (!ysdk) return;
+      try { ysdk.leaderboards?.setScore?.('score', score)?.catch?.(() => {}); } catch (e) {}
+    },
+  };
+})();
+
+/* ===== Локализация ===== */
+const I18N = {
+  ru: { title: 'Блоки: Собери Линии',
+        score: 'Очки', best: 'Рекорд', over: 'Игра окончена', newRecord: 'Новый рекорд!', combo: 'Комбо',
+        revive: 'Продолжить', reviveHint: 'посмотреть рекламу — очистим центр поля', restart: 'Заново' },
+  en: { title: 'Blocks: Clear the Lines',
+        score: 'Score', best: 'Best', over: 'Game over', newRecord: 'New record!', combo: 'Combo',
+        revive: 'Continue', reviveHint: 'watch an ad — we clear the board center', restart: 'Restart' },
+};
+let T = I18N.ru, curLang = null;
+
+/* ===== Звук (WebAudio, без файлов) ===== */
+const Sound = (() => {
+  let ctx = null, muted = false;
+  function ac() { if (!ctx) ctx = new (window.AudioContext || window.webkitAudioContext)(); return ctx; }
+  function beep(freq, dur, type = 'sine', vol = .18, delay = 0) {
+    if (muted || document.hidden) return;
+    try {
+      const c = ac(), o = c.createOscillator(), g = c.createGain();
+      o.type = type; o.frequency.value = freq;
+      g.gain.setValueAtTime(vol, c.currentTime + delay);
+      g.gain.exponentialRampToValueAtTime(.001, c.currentTime + delay + dur);
+      o.connect(g); g.connect(c.destination);
+      o.start(c.currentTime + delay); o.stop(c.currentTime + delay + dur);
+    } catch (e) {}
+  }
+  return {
+    place() { beep(220, .08, 'square', .1); },
+    clear(n) { for (let i = 0; i < Math.min(n, 5); i++) beep(440 + i * 120, .14, 'sine', .16, i * .05); },
+    combo(s) { beep(600 + s * 80, .18, 'triangle', .18); },
+    over() { beep(330, .2, 'sawtooth', .12); beep(220, .3, 'sawtooth', .12, .18); },
+    setMuted(m) { muted = m; },
+    unlock() { try { ac().resume(); } catch (e) {} },
+    suspend() { try { if (ctx) ctx.suspend(); } catch (e) {} },  // п.4.7
+    resume() { try { if (ctx) ctx.resume(); } catch (e) {} },
+  };
+})();
+
+/* ===== Игровые константы ===== */
+const N = 8;
+const COLORS = [
+  null,
+  ['#ff5a5a', '#c73535'], ['#ffa63d', '#d97e14'], ['#ffd54a', '#dbaa16'],
+  ['#4cd964', '#2fa04a'], ['#40c8e0', '#1f9cb5'], ['#5a8cff', '#3a5fd0'],
+  ['#b06aff', '#8a3fe0'], ['#ff6ac8', '#d03fa0'],
+];
+const SHAPES = (() => {
+  const s = [];
+  const add = (cells, w) => s.push({ cells, w });
+  add([[0,0]], 3);
+  for (const len of [2, 3, 4, 5]) {
+    add(Array.from({length: len}, (_, i) => [0, i]), len === 5 ? 1.5 : 2.5);
+    add(Array.from({length: len}, (_, i) => [i, 0]), len === 5 ? 1.5 : 2.5);
+  }
+  add([[0,0],[0,1],[1,0],[1,1]], 3);
+  add([[0,0],[0,1],[0,2],[1,0],[1,1],[1,2],[2,0],[2,1],[2,2]], .8);
+  add([[0,0],[0,1],[0,2],[1,0],[1,1],[1,2]], 1.2);
+  add([[0,0],[1,0],[0,1],[1,1],[2,0],[2,1]], 1.2);
+  // уголки 2x2 (4 ориентации)
+  add([[0,0],[1,0],[1,1]], 1.5); add([[0,0],[0,1],[1,1]], 1.5);
+  add([[0,0],[0,1],[1,0]], 1.5); add([[0,1],[1,0],[1,1]], 1.5);
+  // большие L 3x3 (4 ориентации)
+  add([[0,0],[1,0],[2,0],[2,1],[2,2]], 1); add([[0,0],[0,1],[0,2],[1,0],[2,0]], 1);
+  add([[0,0],[0,1],[0,2],[1,2],[2,2]], 1); add([[0,2],[1,2],[2,0],[2,1],[2,2]], 1);
+  const total = s.reduce((a, x) => a + x.w, 0);
+  return { list: s, total };
+})();
+
+function randomShape() {
+  let r = Math.random() * SHAPES.total;
+  for (const sh of SHAPES.list) { r -= sh.w; if (r <= 0) return sh.cells; }
+  return SHAPES.list[0].cells;
+}
+
+/* ===== Состояние ===== */
+let board, tray, score, best = 0, streak, reviveUsed, overShown;
+let drag = null;               // {slot, cells, color, x, y}
+let inputEnabled = false;        // REQ-1.19: ввод открывается только после LoadingAPI.ready()
+let anims = [];                // клетки-вспышки при очистке
+let floats = [];               // всплывающие тексты
+let particles = [];
+let shake = 0;
+let lastAdTime = 0;
+
+function newGame() {
+  board = Array.from({length: N}, () => Array(N).fill(0));
+  tray = [null, null, null];
+  refillTray();
+  score = 0; streak = 0; reviveUsed = false; overShown = false;
+  anims = []; floats = []; particles = []; drag = null;
+  hideOver();
+  YSDK.gameplayStart();
+}
+
+function refillTray() {
+  for (let i = 0; i < 3; i++) {
+    if (!tray[i]) tray[i] = { cells: randomShape(), color: 1 + Math.floor(Math.random() * (COLORS.length - 1)) };
+  }
+}
+
+function shapeSize(cells) {
+  let mr = 0, mc = 0;
+  for (const [r, c] of cells) { mr = Math.max(mr, r); mc = Math.max(mc, c); }
+  return [mr + 1, mc + 1];
+}
+
+function canPlaceAt(cells, r0, c0) {
+  for (const [r, c] of cells) {
+    const rr = r0 + r, cc = c0 + c;
+    if (rr < 0 || cc < 0 || rr >= N || cc >= N || board[rr][cc]) return false;
+  }
+  return true;
+}
+
+function anyPlacement(cells) {
+  for (let r = 0; r < N; r++) for (let c = 0; c < N; c++) if (canPlaceAt(cells, r, c)) return true;
+  return false;
+}
+
+function place(cells, color, r0, c0) {
+  for (const [r, c] of cells) board[r0 + r][c0 + c] = color;
+  score += cells.length;
+  Sound.place();
+
+  // поиск полных линий
+  const fullR = [], fullC = [];
+  for (let r = 0; r < N; r++) if (board[r].every(v => v)) fullR.push(r);
+  for (let c = 0; c < N; c++) { let f = true; for (let r = 0; r < N; r++) if (!board[r][c]) { f = false; break; } if (f) fullC.push(c); }
+
+  const lines = fullR.length + fullC.length;
+  if (lines > 0) {
+    streak++;
+    const cleared = new Set();
+    for (const r of fullR) for (let c = 0; c < N; c++) cleared.add(r * N + c);
+    for (const c of fullC) for (let r = 0; r < N; r++) cleared.add(r * N + c);
+    for (const key of cleared) {
+      const r = (key / N) | 0, c = key % N;
+      spawnParticles(r, c, board[r][c]);
+      anims.push({ r, c, t: 0, color: board[r][c] });
+      board[r][c] = 0;
+    }
+    const gain = cleared.size * 10 * (1 + 0.5 * (lines - 1)) * (1 + 0.25 * (streak - 1));
+    score += Math.round(gain);
+    Sound.clear(lines);
+    if (streak > 1) Sound.combo(streak);
+    shake = Math.min(6 + lines * 2, 14);
+    addFloat(streak > 1 ? `${T.combo} x${streak}  +${Math.round(gain)}` : `+${Math.round(gain)}`,
+             layout.boardX + layout.boardW / 2, layout.boardY + layout.boardW / 2, streak > 1 ? '#ffd54a' : '#fff');
+  } else {
+    streak = 0;
+  }
+  if (score > best) best = score;
+}
+
+function spawnParticles(r, c, color) {
+  const { boardX, boardY, cell } = layout;
+  const cx = boardX + (c + .5) * cell, cy = boardY + (r + .5) * cell;
+  for (let i = 0; i < 5; i++) {
+    const a = Math.random() * Math.PI * 2, sp = 60 + Math.random() * 160;
+    particles.push({ x: cx, y: cy, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp - 60,
+                     t: 0, life: .5 + Math.random() * .3, color: COLORS[color][0], s: 3 + Math.random() * 4 });
+  }
+}
+
+function addFloat(text, x, y, color) { floats.push({ text, x, y, t: 0, color }); }
+
+function checkGameOver() {
+  if (tray.every(p => !p || !anyPlacement(p.cells))) {
+    if (tray.every(p => !p)) return; // всё использовано — refill произойдёт
+    gameOver();
+  }
+}
+
+function gameOver() {
+  if (overShown) return;
+  overShown = true;
+  Sound.over();
+  YSDK.gameplayStop();
+  YSDK.setScore(best);
+  saveGame();
+  setTimeout(showOver, 600);
+}
+
+/* ===== Сохранение ===== */
+async function saveGame() { YSDK.saveData({ best }); }
+async function loadGame() { const d = await YSDK.loadData(); if (d.best) best = d.best; }
+
+/* ===== Модалка ===== */
+const overModal = document.getElementById('overModal');
+function showOver() {
+  setLang(YSDK.lang); // язык мог определиться позже старта или смениться на лету — сверяемся перед показом
+  document.getElementById('overTitle').textContent = best === score && score > 0 ? '🏆 ' + T.newRecord : T.over;
+  document.getElementById('overScore').textContent = score;
+  document.getElementById('overBest').textContent = `${T.best}: ${best}`;
+  document.getElementById('btnRevive').style.display = reviveUsed ? 'none' : 'block';
+  overModal.classList.add('show');
+}
+function hideOver() { overModal.classList.remove('show'); }
+function applyI18nDom() {
+  document.getElementById('btnRevive').innerHTML = '🎬 ' + T.revive + '<small>' + T.reviveHint + '</small>';
+  document.getElementById('btnRestart').textContent = T.restart;
+  document.getElementById('overTitle').textContent = T.over;
+  document.getElementById('overBest').textContent = `${T.best}: ${best}`;
+  document.title = T.title;
+  document.documentElement.lang = curLang;
+}
+/* Единая точка смены языка: и тексты в DOM, и <title>, и <html lang> (п. 8.2.3) */
+function setLang(lang) {
+  const raw = String(lang || 'ru').slice(0, 2).toLowerCase();
+  const code = I18N[raw] ? raw : 'en';
+  if (code === curLang) return;
+  curLang = code; T = I18N[code];
+  applyI18nDom();
+}
+
+document.getElementById('btnRestart').addEventListener('click', () => {
+  const now = Date.now();
+  if (now - lastAdTime > 60000) {
+    lastAdTime = now;
+    YSDK.showInterstitial(() => newGame());
+  } else newGame();
+});
+
+document.getElementById('btnRevive').addEventListener('click', () => {
+  YSDK.showRewarded(
+    () => { // награда: чистим центральный «плюс» — 4 средних ряда и колонки
+      reviveUsed = true;
+      for (let r = 2; r <= 5; r++) for (let c = 0; c < N; c++) if (board[r][c]) { spawnParticles(r, c, board[r][c]); board[r][c] = 0; }
+      for (let c = 2; c <= 5; c++) for (let r = 0; r < N; r++) if (board[r][c]) { spawnParticles(r, c, board[r][c]); board[r][c] = 0; }
+      tray = [null, null, null]; refillTray();
+      overShown = false; hideOver();
+      YSDK.gameplayStart();
+    },
+    (got) => { if (!got && !reviveUsed) { /* остаёмся в модалке */ } }
+  );
+});
+
+/* ===== Рендер ===== */
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+let layout = {};
+
+function resize() {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const w = window.innerWidth, h = window.innerHeight;
+  canvas.width = w * dpr; canvas.height = h * dpr;
+  canvas.style.width = w + 'px'; canvas.style.height = h + 'px';
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+  const hudH = 74;
+  const landscape = w > h * 1.25;
+  const slots = [];
+  let boardW, boardX, boardY, hudBox = null;
+  if (landscape) {
+    // на широком экране лоток уходит вправо от поля: иначе доска сжимается в узкую колонку по центру
+    boardW = Math.min(h - 36, w * .58);
+    const slotW = Math.min(boardW * .40, Math.max(140, w - boardW - 60));
+    const gap = 26;
+    boardX = (w - (boardW + gap + slotW)) / 2;
+    boardY = (h - boardW) / 2;
+    const colX = boardX + boardW + gap, hudBoxH = 100;
+    const slotH = (boardW - hudBoxH) / 3;
+    for (let i = 0; i < 3; i++) slots.push({ x: colX, y: boardY + hudBoxH + i * slotH, w: slotW, h: slotH });
+    hudBox = { x: colX, y: boardY, w: slotW, h: hudBoxH };
+  } else {
+    const trayH = Math.max(90, h * .17);
+    boardW = Math.min(w - 20, h - hudH - trayH - 30, 640);
+    boardX = (w - boardW) / 2;
+    boardY = hudH + Math.max(6, (h - hudH - trayH - boardW) / 3);
+    const trayY = boardY + boardW + 14;
+    for (let i = 0; i < 3; i++) slots.push({ x: boardX + i * boardW / 3, y: trayY, w: boardW / 3, h: trayH });
+  }
+  layout = { w, h, hudH, boardW, cell: boardW / N, boardX, boardY, slots, landscape, hudBox };
+}
+window.addEventListener('resize', resize);
+window.addEventListener('orientationchange', () => setTimeout(resize, 60)); // п.1.6.1.3
+
+function roundRect(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+function drawBlock(x, y, size, colorIdx, alpha = 1) {
+  const [c1, c2] = COLORS[colorIdx];
+  const pad = size * .06, s = size - pad * 2, r = size * .18;
+  ctx.globalAlpha = alpha;
+  const g = ctx.createLinearGradient(x, y, x, y + s);
+  g.addColorStop(0, c1); g.addColorStop(1, c2);
+  ctx.fillStyle = g;
+  roundRect(x + pad, y + pad, s, s, r);
+  ctx.fill();
+  ctx.fillStyle = 'rgba(255,255,255,.28)';
+  roundRect(x + pad + s * .12, y + pad + s * .08, s * .76, s * .3, r * .8);
+  ctx.fill();
+  ctx.globalAlpha = 1;
+}
+
+let lastT = 0;
+function frame(t) {
+  const dt = Math.min((t - lastT) / 1000, .05); lastT = t;
+  const { w, h, boardX, boardY, boardW, cell } = layout;
+
+  ctx.save();
+  if (shake > 0) { shake = Math.max(0, shake - dt * 40); ctx.translate((Math.random() - .5) * shake, (Math.random() - .5) * shake); }
+
+  // фон
+  const bg = ctx.createLinearGradient(0, 0, 0, h);
+  bg.addColorStop(0, '#1d2040'); bg.addColorStop(1, '#12131f');
+  ctx.fillStyle = bg; ctx.fillRect(-20, -20, w + 40, h + 40);
+
+  // HUD
+  ctx.textAlign = 'center';
+  if (layout.landscape) {
+    // в альбомной раскладке счёт живёт в правой колонке — вся высота отдана полю
+    const hb = layout.hudBox, cx = hb.x + hb.w / 2;
+    ctx.fillStyle = '#9aa0c3'; ctx.font = '600 13px sans-serif';
+    ctx.fillText(T.score.toUpperCase(), cx, hb.y + 22);
+    ctx.fillStyle = '#fff'; ctx.font = '800 40px sans-serif';
+    ctx.fillText(score, cx, hb.y + 62);
+    ctx.fillStyle = '#ffd54a'; ctx.font = '700 15px sans-serif';
+    ctx.fillText(`👑 ${best}`, cx, hb.y + 88);
+  } else {
+    ctx.fillStyle = '#9aa0c3'; ctx.font = '600 13px sans-serif';
+    ctx.fillText(T.score.toUpperCase(), w / 2, 26);
+    ctx.fillStyle = '#fff'; ctx.font = '800 34px sans-serif';
+    ctx.fillText(score, w / 2, 60);
+    ctx.fillStyle = '#ffd54a'; ctx.font = '700 14px sans-serif';
+    ctx.textAlign = 'right';
+    ctx.fillText(`👑 ${best}`, w - 16, 30);
+  }
+
+  // поле
+  ctx.fillStyle = 'rgba(255,255,255,.05)';
+  roundRect(boardX - 6, boardY - 6, boardW + 12, boardW + 12, 14); ctx.fill();
+  for (let r = 0; r < N; r++) for (let c = 0; c < N; c++) {
+    const x = boardX + c * cell, y = boardY + r * cell;
+    ctx.fillStyle = 'rgba(255,255,255,.045)';
+    roundRect(x + cell * .06, y + cell * .06, cell * .88, cell * .88, cell * .15);
+    ctx.fill();
+    if (board[r][c]) drawBlock(x, y, cell, board[r][c]);
+  }
+
+  // ghost-превью при перетаскивании
+  if (drag) {
+    const gp = dragGridPos();
+    if (gp && canPlaceAt(drag.cells, gp[0], gp[1])) {
+      for (const [r, c] of drag.cells)
+        drawBlock(boardX + (gp[1] + c) * cell, boardY + (gp[0] + r) * cell, cell, drag.color, .35);
+    }
+  }
+
+  // вспышки очистки
+  for (let i = anims.length - 1; i >= 0; i--) {
+    const a = anims[i]; a.t += dt;
+    const p = a.t / .3;
+    if (p >= 1) { anims.splice(i, 1); continue; }
+    const s = cell * (1 + p * .4);
+    ctx.globalAlpha = 1 - p;
+    drawBlock(boardX + a.c * cell - (s - cell) / 2, boardY + a.r * cell - (s - cell) / 2, s, a.color);
+    ctx.globalAlpha = 1;
+  }
+
+  // лоток
+  for (let i = 0; i < 3; i++) {
+    const p = tray[i];
+    if (!p || (drag && drag.slot === i)) continue;
+    const s = layout.slots[i];
+    const [rows, cols] = shapeSize(p.cells);
+    const mini = Math.min(s.w * .84 / cols, s.h * .84 / rows, cell * (layout.landscape ? .95 : .8));
+    const ox = s.x + (s.w - cols * mini) / 2;
+    const oy = s.y + (s.h - rows * mini) / 2;
+    const fits = anyPlacement(p.cells);
+    for (const [r, c] of p.cells) drawBlock(ox + c * mini, oy + r * mini, mini, p.color, fits ? 1 : .3);
+  }
+
+  // перетаскиваемая фигура
+  if (drag) {
+    const [rows, cols] = shapeSize(drag.cells);
+    const px = drag.x - cols * cell / 2, py = drag.y - rows * cell - 20;
+    for (const [r, c] of drag.cells) drawBlock(px + c * cell, py + r * cell, cell, drag.color);
+  }
+
+  // частицы
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i]; p.t += dt;
+    if (p.t >= p.life) { particles.splice(i, 1); continue; }
+    p.x += p.vx * dt; p.y += p.vy * dt; p.vy += 500 * dt;
+    ctx.globalAlpha = 1 - p.t / p.life;
+    ctx.fillStyle = p.color;
+    ctx.fillRect(p.x - p.s / 2, p.y - p.s / 2, p.s, p.s);
+    ctx.globalAlpha = 1;
+  }
+
+  // всплывающие тексты
+  for (let i = floats.length - 1; i >= 0; i--) {
+    const f = floats[i]; f.t += dt;
+    if (f.t >= 1.1) { floats.splice(i, 1); continue; }
+    ctx.globalAlpha = Math.min(1, 2 - f.t * 1.8);
+    ctx.fillStyle = f.color; ctx.textAlign = 'center';
+    ctx.font = '800 26px sans-serif';
+    ctx.fillText(f.text, f.x, f.y - f.t * 50);
+    ctx.globalAlpha = 1;
+  }
+
+  ctx.restore();
+  requestAnimationFrame(frame);
+}
+
+/* ===== Ввод ===== */
+function dragGridPos() {
+  const { boardX, boardY, cell } = layout;
+  const [rows, cols] = shapeSize(drag.cells);
+  const px = drag.x - cols * cell / 2, py = drag.y - rows * cell - 20;
+  const c0 = Math.round((px - boardX) / cell), r0 = Math.round((py - boardY) / cell);
+  if (r0 < -1 || c0 < -1 || r0 > N || c0 > N) return null;
+  return [Math.max(0, Math.min(N - rows, r0)), Math.max(0, Math.min(N - cols, c0))];
+}
+
+canvas.addEventListener('pointerdown', e => {
+  if (!inputEnabled) return;
+  Sound.unlock();
+  if (overShown) return;
+  const pad = 12;
+  const slot = layout.slots.findIndex(s =>
+    e.clientX >= s.x - pad && e.clientX <= s.x + s.w + pad &&
+    e.clientY >= s.y - pad && e.clientY <= s.y + s.h + pad);
+  if (slot < 0 || !tray[slot]) return;
+  if (!anyPlacement(tray[slot].cells)) return;
+  drag = { slot, cells: tray[slot].cells, color: tray[slot].color, x: e.clientX, y: e.clientY };
+  try { canvas.setPointerCapture(e.pointerId); } catch (err) {}
+});
+canvas.addEventListener('pointermove', e => { if (drag) { drag.x = e.clientX; drag.y = e.clientY; } });
+canvas.addEventListener('pointerup', e => {
+  if (!drag) return;
+  const gp = dragGridPos();
+  if (gp && canPlaceAt(drag.cells, gp[0], gp[1])) {
+    place(drag.cells, drag.color, gp[0], gp[1]);
+    tray[drag.slot] = null;
+    if (tray.every(p => !p)) refillTray();
+    drag = null;
+    checkGameOver();
+  } else {
+    drag = null;
+  }
+});
+canvas.addEventListener('pointercancel', () => { drag = null; });
+document.addEventListener('contextmenu', e => e.preventDefault());
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) YSDK.gameplayStop();
+  else if (!overShown) YSDK.gameplayStart();
+});
+
+/* ===== Запуск ===== */
+(async function main() {
+  resize();
+  setLang(navigator.language || 'ru'); // предварительный язык — до ответа SDK, чтобы русский не мелькал в EN
+  await YSDK.init();
+  setLang(YSDK.lang);                  // окончательный — из окружения платформы
+  await loadGame();
+  // п. 1.19: сигнал готовности — после загрузки, ДО старта геймплея (newGame вызывает gameplayStart)
+  newGame();
+  // п.1.19: ready() уходит после первой отрисовки. Фолбэк по таймеру — на скрытой вкладке
+  // requestAnimationFrame не тикает вообще, и без него игра осталась бы без ready() и с закрытым вводом.
+  let bootDone = false;
+  const finishBoot = () => {
+    if (bootDone) return; bootDone = true;
+    YSDK.gameReady();
+    inputEnabled = true; // REQ-1.19: до ready() игра клики не принимает
+  };
+  requestAnimationFrame(t => { lastT = t; frame(t); finishBoot(); });
+  setTimeout(finishBoot, 1200);
+})();
+</script>
+</body>
+</html>

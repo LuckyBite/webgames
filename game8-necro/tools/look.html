@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<meta charset="utf-8">
+<title>Некро · облик</title>
+<!--
+  Выбор облика: лицо некроманта, пол, стены, декор. Всё из того же набора DCSS, что
+  персонажи (public domain). Клик выбирает, «Сохранить» пишет art/look.json; в игру
+  выбранное переносится отдельным шагом. Превью пола и стен затемнены радиальным
+  пятном — так они выглядят в игре под факелом, а не на белом фоне.
+-->
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #0a0810; color: #c9c2b4; font: 13px/1.4 system-ui, sans-serif; padding-bottom: 40px; }
+  header { position: sticky; top: 0; z-index: 2; background: #0a0810; padding: 10px 16px; border-bottom: 1px solid #3a2e2b; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+  h1 { margin: 0; font-size: 16px; color: #e6dcc0; }
+  button { background: #1e3a2a; color: #8dffb0; border: 1px solid #3f8f5c; border-radius: 4px; padding: 5px 14px; cursor: pointer; font: inherit; }
+  #status { color: #8a8070; font-size: 12px; }
+  h2 { margin: 18px 16px 4px; font-size: 15px; color: #8dffb0; }
+  .note { margin: 0 16px 8px; color: #8a8070; font-size: 12px; }
+  .grid { display: flex; flex-wrap: wrap; gap: 8px; padding: 0 16px; }
+  .c { background: #14100f; border: 2px solid transparent; border-radius: 4px; padding: 5px; cursor: pointer; text-align: center; }
+  .c:hover { border-color: #52413c; }
+  .c.on { border-color: #8dffb0; background: #1e3a2a; }
+  .c canvas { image-rendering: pixelated; display: block; margin: 0 auto; }
+  .c i { font-style: normal; font-size: 10px; color: #8a8070; display: block; margin-top: 3px; }
+  .face { display: flex; gap: 6px; align-items: flex-end; }
+  .face span { font-size: 9px; color: #6a5f52; display: block; }
+</style>
+<header>
+  <h1>Облик подземелья</h1>
+  <button id="save">Сохранить</button>
+  <span id="status"></span>
+</header>
+
+<h2>Лицо некроманта</h2>
+<div class="note">Слева бюст, как он встанет в шапку (верхняя половина тайла, ×3), справа фигура целиком.
+  Учти: <b>necromancer</b> уже играет Прахолова, <b>servant_of_whispers</b> — Мага; дубль будет путать.</div>
+<div class="grid" id="face"></div>
+<div class="note" style="margin-top:10px">Все существа набора — лицо можно взять из любого. Клик выбирает.
+  <select id="dir"></select> <input id="q" placeholder="поиск: lich, mage, vampire…" size="24">
+  <span id="count"></span></div>
+<div class="grid" id="allfaces"></div>
+
+<h2>Пол</h2>
+<div class="note">Кусок 6×4 тайла из случайных вариантов семейства, как ляжет в игре.</div>
+<div class="grid" id="floor"></div>
+
+<h2>Стены</h2>
+<div class="grid" id="wall"></div>
+
+<h2>Декор (можно несколько)</h2>
+<div class="note">Встанут вдоль стен и в нишах вместо нынешних пустых. Клик включает и выключает.</div>
+<div class="grid" id="decor"></div>
+
+<script type="module">
+const BASE = 'https://raw.githubusercontent.com/crawl/crawl/master/crawl-ref/source/rltiles/';
+const $ = id => document.getElementById(id);
+const status = t => { $('status').textContent = t; };
+
+const FACES = ['mon/humanoids/humans/necromancer', 'mon/humanoids/humans/occultist', 'mon/humanoids/humans/burial_acolyte',
+  'mon/humanoids/humans/arcanist', 'mon/humanoids/humans/ragged_hierophant', 'mon/humanoids/humans/death_knight',
+  'mon/humanoids/humans/servant_of_whispers', 'mon/undead/vampire_mage', 'mon/undead/halazid_warlock',
+  'mon/unique/kirke', 'mon/unique/jory', 'mon/unique/agnes', 'mon/unique/mara', 'mon/unique/nergalle',
+  'mon/unique/louise', 'mon/unique/erolcha', 'mon/unique/khufu', 'mon/unique/ereshkigal', 'mon/unique/frances'];
+const FLOORS = ['crypt', 'necro_squares', 'necropolis_squares', 'tomb', 'cobble_blood', 'grey_dirt', 'limestone',
+  'sandstone_floor', 'etched', 'green_bones', 'marble_floor', 'pebble_brown', 'rect_gray', 'swirlstone', 'depthstone_floor', 'black_cobalt'];
+const WALLS = ['catacombs', 'crypt', 'rock_wall_crypt', 'tomb', 'undead', 'undead_brown', 'wall_stone_ossuary',
+  'wall_stone_necropolis', 'brick_dark_1', 'brick_dark_3', 'brick_dark_5', 'stone_dark', 'stone2_dark',
+  'stone_black_marked', 'relief', 'metal_wall_necropolis', 'wall_hall_shadows', 'church', 'brick_brown'];
+const DECOR = ['statues/crumbled_column_1', 'statues/crumbled_column_3', 'statues/crumbled_column_5', 'statues/depths_column',
+  'statues/statue_wraith', 'statues/statue_ancient_evil', 'statues/statue_depths_zot_lich', 'statues/statue_demonic_bust',
+  'statues/statue_sword', 'statues/statue_polearm', 'statues/statue_twins', 'decor/blood_fountain', 'decor/dry_fountain',
+  'decor/eyes_fountain', 'decor/decorative_floor'];
+
+const dngn = await (await fetch('../art/dcss-dngn-index.json')).json();
+const variants = (kind, fam) => dngn.filter(p => {
+  const m = p.match(new RegExp(`^dngn/${kind}/${fam}_?\\d*\\.png$`)); return !!m;
+}).map(p => p.replace(/\.png$/, ''));
+
+const load = src => new Promise(res => { const i = new Image(); i.crossOrigin = 'anonymous'; i.onload = () => res(i); i.onerror = () => res(null); i.src = src; });
+
+let look = {};
+try { const r = await fetch('../art/look.json', { cache: 'no-store' }); if (r.ok) look = await r.json(); } catch {}
+look.decor ||= [];
+
+function card(box, key, val, multi, draw, label) {
+  const c = document.createElement('div');
+  const on = () => multi ? look[key].includes(val) : look[key] === val;
+  c.className = 'c' + (on() ? ' on' : '');
+  draw(c);
+  const i = document.createElement('i'); i.textContent = label; c.append(i);
+  c.onclick = () => {
+    if (multi) { const a = look[key]; a.includes(val) ? a.splice(a.indexOf(val), 1) : a.push(val); c.classList.toggle('on', on()); }
+    else {
+      look[key] = val;
+      // Лицо выбирается из двух сеток сразу — гасить надо обе
+      const scope = key === 'face' ? document.querySelectorAll('#face .c, #allfaces .c') : box.querySelectorAll('.c');
+      scope.forEach(e => e.classList.remove('on'));
+      c.classList.add('on');
+    }
+    status('есть несохранённые изменения');
+  };
+  box.append(c);
+}
+
+// Затемнение под факел: пятно света в центре, края уходят в тень — как в сцене
+function torchShade(x, w, h) {
+  const g = x.createRadialGradient(w * 0.5, h * 0.55, 10, w * 0.5, h * 0.55, w * 0.65);
+  g.addColorStop(0, 'rgba(255,170,90,0.10)'); g.addColorStop(0.5, 'rgba(10,8,16,0.35)'); g.addColorStop(1, 'rgba(10,8,16,0.85)');
+  x.fillStyle = g; x.fillRect(0, 0, w, h);
+}
+
+// Лица
+for (const p of FACES) {
+  card($('face'), 'face', p, false, c => {
+    const wrap = document.createElement('div'); wrap.className = 'face';
+    const bust = document.createElement('canvas'); bust.width = 32; bust.height = 18; bust.style.width = '96px'; bust.style.height = '54px';
+    bust.style.background = '#241d1c';
+    const full = document.createElement('canvas'); full.width = 32; full.height = 32; full.style.width = '64px'; full.style.height = '64px';
+    wrap.append(bust, full); c.append(wrap);
+    load(BASE + p + '.png').then(img => {
+      if (!img) { c.remove(); return; }
+      const bx = bust.getContext('2d'); bx.imageSmoothingEnabled = false; bx.drawImage(img, 0, 0, 32, 18, 0, 0, 32, 18);
+      const fx = full.getContext('2d'); fx.imageSmoothingEnabled = false; fx.drawImage(img, 0, 0);
+    });
+  }, p.split('/').pop());
+}
+
+/* Полная галерея: все существа из индекса кастинга. Плитки строятся один раз и дальше
+   только прячутся — урок кастинга: пересборка сетки на клик заново тянула картинки с
+   GitHub, и сетка пустела. */
+const ALL = (await (await fetch('../art/dcss-mon-index.json')).json())
+  .filter(p => !p.startsWith('tentacles/')).map(p => 'mon/' + p.replace(/\.png$/, ''));
+const dirOf = p => p.split('/').slice(1, -1).join('/');
+const dirs = [...new Set(ALL.map(dirOf))].sort();
+$('dir').innerHTML = '<option value="">все папки</option>' + dirs.map(d => `<option>${d}</option>`).join('');
+$('dir').value = 'humanoids/humans';
+const allEls = new Map();
+for (const p of ALL) {
+  const c = document.createElement('div');
+  c.className = 'c' + (look.face === p ? ' on' : '');
+  c.style.display = 'none';
+  c.title = p;
+  const i = document.createElement('i'); i.textContent = p.split('/').pop();
+  c.append(i);
+  c.onclick = () => {
+    look.face = p;
+    document.querySelectorAll('#face .c, #allfaces .c').forEach(e => e.classList.remove('on'));
+    c.classList.add('on');
+    status('лицо: ' + p.split('/').pop() + ' · есть несохранённые изменения');
+  };
+  allEls.set(p, { c, img: null });
+  $('allfaces').append(c);
+}
+function filterAll() {
+  const d = $('dir').value, q = $('q').value.trim().toLowerCase();
+  let n = 0;
+  for (const [p, o] of allEls) {
+    const show = (!d || dirOf(p) === d) && (!q || p.toLowerCase().includes(q));
+    o.c.style.display = show ? '' : 'none';
+    if (show) {
+      n++;
+      if (!o.img) {
+        o.img = document.createElement('img');
+        o.img.loading = 'lazy'; o.img.src = BASE + p + '.png';
+        o.img.style.cssText = 'width:64px;height:64px;image-rendering:pixelated;display:block;margin:0 auto';
+        o.img.onerror = () => { o.c.remove(); allEls.delete(p); };
+        o.c.prepend(o.img);
+      }
+    }
+  }
+  $('count').textContent = n + ' шт.';
+}
+$('dir').onchange = filterAll;
+$('q').oninput = () => { if ($('q').value) $('dir').value = ''; filterAll(); };
+filterAll();
+
+// Пол и стены — кусок из случайных вариантов семейства
+async function patch(c, kind, fam, cols, rows) {
+  const vs = variants(kind, fam);
+  const cv = document.createElement('canvas'); cv.width = cols * 32; cv.height = rows * 32;
+  cv.style.width = (cols * 32 * 1.5) + 'px'; cv.style.height = (rows * 32 * 1.5) + 'px';
+  c.prepend(cv);
+  const imgs = (await Promise.all(vs.slice(0, 16).map(v => load(BASE + v + '.png')))).filter(Boolean);
+  if (!imgs.length) { c.remove(); return; }
+  const x = cv.getContext('2d'); x.imageSmoothingEnabled = false;
+  let seed = fam.length * 7;
+  for (let j = 0; j < rows; j++) for (let i = 0; i < cols; i++) {
+    seed = (seed * 9301 + 49297) % 233280;
+    x.drawImage(imgs[seed % imgs.length], i * 32, j * 32);
+  }
+  torchShade(x, cv.width, cv.height);
+}
+for (const f of FLOORS) card($('floor'), 'floor', f, false, c => patch(c, 'floor', f, 6, 4), `${f} (${variants('floor', f).length})`);
+for (const w of WALLS) card($('wall'), 'wall', w, false, c => patch(c, 'wall', w, 6, 3), `${w} (${variants('wall', w).length})`);
+
+// Декор — на фоне выбранной стены не рисуем, просто на камне
+for (const d of DECOR) {
+  card($('decor'), 'decor', 'dngn/' + d, true, c => {
+    const cv = document.createElement('canvas'); cv.width = 32; cv.height = 32; cv.style.width = '64px'; cv.style.height = '64px'; cv.style.background = '#241d1c';
+    c.append(cv);
+    load(BASE + 'dngn/' + d + '.png').then(img => { if (!img) { c.remove(); return; } const x = cv.getContext('2d'); x.imageSmoothingEnabled = false; x.drawImage(img, 0, 0); });
+  }, d.split('/').pop());
+}
+
+$('save').onclick = async () => {
+  const b64 = btoa(unescape(encodeURIComponent(JSON.stringify(look, null, 2))));
+  const r = await fetch('/upload?file=' + encodeURIComponent('game8-necro/art/look.json'), { method: 'POST', body: b64 });
+  status(r.ok ? 'сохранено в art/look.json · ' + new Date().toLocaleTimeString() : 'ошибка ' + r.status);
+};
+window.__look = look;
+</script>

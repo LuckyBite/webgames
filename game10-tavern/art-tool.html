@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Таверна — обработка картинок</title>
+<style>
+  body { margin: 0; background: #1a110b; color: #efe2c4; font: 15px/1.4 system-ui, sans-serif; }
+  header { padding: 16px 20px 10px; border-bottom: 1px solid #3a2a1e; }
+  h1 { margin: 0 0 4px; font-size: 20px; }
+  .hint { color: #b89a72; font-size: 13px; }
+  #controls { display: flex; flex-wrap: wrap; gap: 12px 24px; padding: 12px 20px; align-items: center; }
+  label { display: inline-flex; align-items: center; gap: 8px; white-space: nowrap; }
+  input[type=number] { width: 70px; }
+  input[type=range] { width: 120px; }
+  button { background: #6b4423; color: #fff1c1; border: 0; border-radius: 8px; padding: 8px 14px; font: inherit; cursor: pointer; }
+  button:disabled { opacity: 0.4; cursor: default; }
+  #drop { margin: 4px 20px 16px; padding: 26px; border: 2px dashed #6b4423; border-radius: 12px; text-align: center; color: #c9a57a; }
+  #drop.over { border-color: #ffd166; color: #fff1c1; background: #2b1a11; }
+  #cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 14px; padding: 0 20px 24px; }
+  .card { background: #2b1a11; border-radius: 12px; padding: 10px; text-align: center; }
+  .card canvas { display: block; margin: 0 auto 8px; max-width: 100%; }
+  .card .name { font-weight: 600; word-break: break-all; }
+  .card .meta { color: #b89a72; font-size: 13px; min-height: 2.6em; }
+  .card a { color: #ffd166; }
+  .card.bad { outline: 2px solid #e0523f; }
+  .card.bad .meta { color: #ffb3a7; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Таверна: обработка картинок из генератора</h1>
+  <div class="hint">Перетащите PNG или WebP. Каждая картинка обрезается по прозрачности, вписывается в квадрат,
+    проходит тёплую цветокоррекцию и сохраняется как <code>&lt;id&gt;.webp</code>. Имя файла и есть id
+    (<code>bread.png</code> → <code>bread.webp</code>). Предпросмотр на фоне кухни.</div>
+</header>
+
+<div id="controls">
+  <label>Режим
+    <select id="mode">
+      <option value="item">продукт: обрезать и вписать в квадрат</option>
+      <option value="bg">фон или декор: размер как есть</option>
+    </select>
+  </label>
+  <label>Сторона квадрата <input id="size" type="number" min="32" max="1024" step="1" value="128"></label>
+  <label>Поле, % <input id="pad" type="number" min="0" max="40" step="1" value="10"></label>
+  <label>Тепло <input id="warm" type="range" min="0" max="100" value="60"> <span id="warmVal">60</span></label>
+  <label><input id="warmOff" type="checkbox"> цветокоррекция выкл</label>
+  <label>Качество WebP <input id="quality" type="range" min="50" max="100" value="82"> <span id="qualityVal">82</span></label>
+  <button id="downloadAll" disabled>Скачать все</button>
+  <button id="clear" disabled>Очистить</button>
+</div>
+
+<div id="drop">
+  Перетащите файлы сюда или <label style="display:inline"><u>выберите</u><input id="file" type="file" multiple accept="image/png,image/webp" hidden></label>
+</div>
+<div id="cards"></div>
+
+<script type="module">
+import { idFromName, trimAlpha, fitRect, warmGrade } from './art-tool.js';
+
+// Логика без DOM лежит в art-tool.js и покрыта тестами; здесь только канвас, файлы и карточки.
+const $ = id => document.getElementById(id);
+const items = [];   // { id, bitmap, bbox, canvas, blob, card, url }
+const PREVIEW_BG = '#2b1a11';
+
+function settings() {
+  return {
+    mode: $('mode').value,
+    size: Math.max(32, Math.min(1024, Number($('size').value) || 128)),
+    pad: Math.max(0, Math.min(0.4, Number($('pad').value) / 100 || 0)),
+    warm: $('warmOff').checked ? 0 : Number($('warm').value) / 100,
+    quality: Number($('quality').value) / 100,
+  };
+}
+
+// Исходник → ImageData один раз на файл: обрезка от настроек не зависит.
+function sourceData(bitmap) {
+  const c = document.createElement('canvas');
+  c.width = bitmap.width; c.height = bitmap.height;
+  const ctx = c.getContext('2d');
+  ctx.drawImage(bitmap, 0, 0);
+  return ctx.getImageData(0, 0, c.width, c.height);
+}
+
+const toBlob = (canvas, quality) => new Promise(resolve => canvas.toBlob(resolve, 'image/webp', quality));
+
+async function process(item, cfg) {
+  const { bitmap, bbox } = item;
+  const out = item.canvas;
+  let src = { x: 0, y: 0, w: bitmap.width, h: bitmap.height }, dst = src;
+  if (cfg.mode === 'item') {
+    if (!bbox) { fail(item, 'картинка полностью прозрачная'); return; }
+    src = bbox;
+    out.width = out.height = cfg.size;
+    dst = fitRect(bbox.w, bbox.h, cfg.size, cfg.pad);
+  } else {
+    out.width = bitmap.width; out.height = bitmap.height;
+  }
+  const ctx = out.getContext('2d');
+  ctx.clearRect(0, 0, out.width, out.height);
+  ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(bitmap, src.x, src.y, src.w, src.h, dst.x, dst.y, dst.w, dst.h);
+  if (cfg.warm > 0) {
+    const data = ctx.getImageData(0, 0, out.width, out.height);
+    warmGrade(data, cfg.warm);
+    ctx.putImageData(data, 0, 0);
+  }
+  const blob = await toBlob(out, cfg.quality);
+  if (!blob || blob.type !== 'image/webp') { fail(item, 'браузер не умеет WebP, откройте в Chrome'); return; }
+  if (item.url) URL.revokeObjectURL(item.url);
+  item.blob = blob; item.url = URL.createObjectURL(blob);
+  item.card.classList.remove('bad');
+  item.meta.textContent = `${out.width}×${out.height}, ${(blob.size / 1024).toFixed(1)} КБ (исходник ${bitmap.width}×${bitmap.height})`;
+  item.link.href = item.url; item.link.download = item.id + '.webp';
+  item.link.style.display = '';
+}
+
+function fail(item, why) {
+  item.blob = null; item.card.classList.add('bad');
+  item.meta.textContent = why; item.link.style.display = 'none';
+}
+
+let running = null;
+async function processAll() {
+  // Если настройки дёрнули во время обработки, прогон дойдёт до конца и запустится ещё раз.
+  if (running) { running.again = true; return; }
+  running = { again: false };
+  do {
+    running.again = false;
+    const cfg = settings();
+    for (const it of items) await process(it, cfg);
+  } while (running.again);
+  running = null;
+  $('downloadAll').disabled = !items.some(it => it.blob);
+  $('clear').disabled = !items.length;
+}
+
+function makeCard(item) {
+  const card = document.createElement('div'); card.className = 'card';
+  const canvas = document.createElement('canvas'); canvas.style.background = PREVIEW_BG;
+  const name = document.createElement('div'); name.className = 'name'; name.textContent = item.id + '.webp';
+  const meta = document.createElement('div'); meta.className = 'meta'; meta.textContent = 'обработка…';
+  const link = document.createElement('a'); link.textContent = 'скачать'; link.style.display = 'none';
+  card.append(canvas, name, meta, link);
+  $('cards').append(card);
+  Object.assign(item, { card, canvas, meta, link });
+}
+
+async function addFiles(files) {
+  for (const f of files) {
+    if (!/^image\/(png|webp)$/.test(f.type)) continue;
+    let bitmap;
+    try { bitmap = await createImageBitmap(f); } catch { continue; }
+    const item = { id: idFromName(f.name), bitmap, bbox: trimAlpha(sourceData(bitmap)) };
+    makeCard(item);
+    items.push(item);
+  }
+  processAll();
+}
+
+// Браузер спрашивает разрешение на несколько загрузок подряд: один раз нажать «Разрешить».
+async function downloadAll() {
+  for (const it of items) {
+    if (!it.blob) continue;
+    it.link.click();
+    await new Promise(r => setTimeout(r, 300));
+  }
+}
+
+function clearAll() {
+  for (const it of items) { if (it.url) URL.revokeObjectURL(it.url); it.bitmap.close?.(); }
+  items.length = 0;
+  $('cards').replaceChildren();
+  $('downloadAll').disabled = $('clear').disabled = true;
+}
+
+const drop = $('drop');
+drop.addEventListener('dragover', e => { e.preventDefault(); drop.classList.add('over'); });
+drop.addEventListener('dragleave', () => drop.classList.remove('over'));
+drop.addEventListener('drop', e => { e.preventDefault(); drop.classList.remove('over'); addFiles(e.dataTransfer.files); });
+$('file').addEventListener('change', e => { addFiles(e.target.files); e.target.value = ''; });
+for (const id of ['mode', 'size', 'pad', 'warm', 'warmOff', 'quality']) $(id).addEventListener('change', processAll);
+$('warm').addEventListener('input', () => { $('warmVal').textContent = $('warm').value; });
+$('quality').addEventListener('input', () => { $('qualityVal').textContent = $('quality').value; });
+$('downloadAll').addEventListener('click', downloadAll);
+$('clear').addEventListener('click', clearAll);
+</script>
+</body>
+</html>

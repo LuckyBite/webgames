@@ -1,0 +1,2179 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Дварфы-копатели</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { height: 100%; overflow: hidden; background: #0d0a12; }
+  body { user-select: none; -webkit-user-select: none; }
+  #game { position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%);
+    touch-action: none; display: block; image-rendering: pixelated; image-rendering: crisp-edges; }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<!-- sdk.js: только для Яндекс Игр -->
+<script src="sfx.js"></script>
+<script>
+/* ═══════════════════════════════════════════════════════════════════════════
+   «Дварфы-копатели» v2 (game5-dwarves; v1 заморожена в v1/)
+   Пиксельный подгорный город, растущий вниз: кликер + идл + лёгкий симулятор
+   колонии. Дварфы автономны — игрок их не расставляет, а создаёт условия.
+
+   Арт-тезис:  «Камень старше нас; свет мы принесли с собой».
+               Свет существует только там, куда его принесли: построенный зал
+               получает факел и градиент яркости от него, пустой стоит тёмным
+               силуэтом, края кадра гаснут холодной виньеткой, в столбах света
+               оседает пыль. Порода за пределами города — сплошная и старая.
+
+   Спека:      docs/superpowers/specs/2026-08-10-dwarves-design.md
+   Симулятор:  docs/superpowers/sim/deep-city-economy.js  — все числа оттуда,
+               меняя любое, прогонять симулятор заново.
+   Звук:       shared/sfx.js (копия рядом) — слоёный синтез, музыка mood
+               «mine», эмбиент «cave». Бипов v1 больше нет.
+   Канон:      весь рендер в буфер 1:1, вывод целым множителем, целые координаты.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ═══════════════ Обёртка Yandex SDK (мок-режим локально) ═══════════════ */
+const YSDK = (() => {
+  let ysdk = null, player = null, readySent = false;
+  function fireReady() {
+    if (readySent) return; readySent = true;
+    try { ysdk && ysdk.features && ysdk.features.LoadingAPI && ysdk.features.LoadingAPI.ready(); } catch (e) {}
+  }
+  async function init() {
+    if (typeof YaGames === 'undefined') return;
+    try { ysdk = await Promise.race([YaGames.init(), new Promise((_, rej) => setTimeout(() => rej(0), 8000))]); }
+    catch (e) { ysdk = null; }
+    if (ysdk) {
+      try { player = await Promise.race([ysdk.getPlayer(), new Promise(r => setTimeout(() => r(null), 3000))]); }
+      catch (e) { player = null; }
+    }
+  }
+  const unmute = () => Sound.setMuted(!!(st && st.muted));
+  return {
+    init,
+    get lang() { try { return ysdk ? ysdk.environment.i18n.lang : (navigator.language || 'ru').slice(0, 2); } catch (e) { return 'ru'; } },
+    gameReady: fireReady,
+    gameplayStart() { try { ysdk && ysdk.features && ysdk.features.GameplayAPI && ysdk.features.GameplayAPI.start(); } catch (e) {} },
+    gameplayStop() { try { ysdk && ysdk.features && ysdk.features.GameplayAPI && ysdk.features.GameplayAPI.stop(); } catch (e) {} },
+    showInterstitial(onClose) {
+      if (!ysdk) { onClose && onClose(); return; }
+      this.gameplayStop(); Sound.setMuted(true);
+      ysdk.adv.showFullscreenAdv({ callbacks: {
+        onClose: () => { unmute(); onClose && onClose(); },
+        onError: () => { unmute(); onClose && onClose(); },
+      }});
+    },
+    showRewarded(onReward, onClose) {
+      if (!ysdk) { onReward && onReward(); onClose && onClose(true); return; }
+      this.gameplayStop(); Sound.setMuted(true);
+      let ok = false;
+      ysdk.adv.showRewardedVideo({ callbacks: {
+        onRewarded: () => { ok = true; onReward && onReward(); },
+        onClose: () => { unmute(); onClose && onClose(ok); },
+        onError: () => { unmute(); onClose && onClose(false); },
+      }});
+    },
+    async saveData(obj) {
+      if (player) { try { await player.setData(obj); return; } catch (e) {} }
+      try { localStorage.setItem('dwarves_save', JSON.stringify(obj)); } catch (e) {}
+    },
+    async loadData() {
+      if (player) { try { const d = await player.getData(); if (d && Object.keys(d).length) return d; } catch (e) {} }
+      try { return JSON.parse(localStorage.getItem('dwarves_save')) || {}; } catch (e) { return {}; }
+    },
+  };
+})();
+
+/* ═══════════════ Локализация ═══════════════ */
+const I18N = {
+  ru: {
+    // первое имя короткое: «Земля и корни» обрезалось в HUD до «ЗЕМЛЯ И КОРН.»
+    strata: ['Корни', 'Известняк', 'Гранит', 'Базальт', 'Обсидиан', 'Адамант', 'Бездна'],
+    ores: ['', 'Медь', 'Железо', 'Серебро', 'Мифрил', 'Адамант'],
+    rooms: { mine: 'Рудник', bed: 'Спальня', farm: 'Грибница', brew: 'Пивоварня',
+             tavern: 'Таверна', store: 'Склад', forge: 'Кузница', smelt: 'Плавильня' },
+    roomWhat: { mine: 'Добыча руды', bed: '+2 койки', farm: 'Растит грибы',
+                brew: 'Варит эль', tavern: 'Поднимает дух', store: 'Больше места',
+                forge: 'Кирки и броня', smelt: 'Слитки дороже' },
+    traits: ['Трудяга', 'Пьяница', 'Крепыш', 'Жадный', 'Ворчун', 'Весельчак', 'Везучий', 'Упрямый'],
+    blocks: { rock: 'Порода', vein: 'Жила', cave: 'Каверна', crystal: 'Кристалл', water: 'Вода' },
+    build: 'Построить', upgrade: 'Улучшить', lvl: 'Ур.', maxed: 'Максимум',
+    depth: 'м', stone: 'Камень', gold: 'Золото', ale: 'Эль', gems: 'Самоцветы', mush: 'Грибы',
+    dwarves: 'Дварфы', pick: 'Кирка', gear: 'Снаряжение', cart: 'Вагонетка',
+    caravan: 'Караван', contracts: 'Контракты', forgeT: 'Кузница', sellAll: 'Продать всё',
+    hire: 'Нанять', found: 'Дварф из каверны!',
+    sellX2: 'Продать ×2', reward: 'Награда', deliver: 'Отдать', reroll: 'Сменить',
+    task: { dig: 'Копает', room: 'В комнате', sleep: 'Спит', drink: 'Пьёт', idle: 'Без дела', walk: 'Идёт' },
+    offline: 'Пока вас не было', mined: 'Добыто', x2: '×2 за рекламу', ok: 'Отлично',
+    rage: 'Гномий раж', rageOn: 'Раж! ×5 к удару', instant: 'Достроить', callDwarf: 'Позвать дварфа',
+    noBeds: 'Нужны койки!', noAle: 'Кончился эль!', full: 'Склад полон', ad: 'РЕК',
+    needSupports: 'Дальше нужен зал',
+    newStratum: 'Новый пласт', mark: 'Приказ', order: 'Копать первым',
+    // строки полосы держим короче двадцати знаков: длинные обрезаются в мусор
+    tut: ['Тапай блоки породы', 'Копай глубже', 'Тапни зелёный плюс',
+          'Койки зовут дварфов', 'Построй рудник'],
+    hint: 'Долгий тап по блоку — копать первым',
+    daily: 'Ежедневный дар', day: 'День', caravanHere: 'Караван у ворот!',
+    bonus: 'Цена +25%', tierAt: 'Ярус', effGear: 'Сила', effOff: 'Оффлайн',
+    mile: 'Веха', colony: 'Колония',
+  },
+  en: {
+    strata: ['Roots', 'Limestone', 'Granite', 'Basalt', 'Obsidian', 'Adamant', 'The Abyss'],
+    ores: ['', 'Copper', 'Iron', 'Silver', 'Mithril', 'Adamant'],
+    rooms: { mine: 'Ore mine', bed: 'Dormitory', farm: 'Mushroom farm', brew: 'Brewery',
+             tavern: 'Tavern', store: 'Storehouse', forge: 'Forge', smelt: 'Smeltery' },
+    roomWhat: { mine: 'Mines ore', bed: '+2 bunks', farm: 'Grows shrooms',
+                brew: 'Brews ale', tavern: 'Lifts spirits', store: 'More storage',
+                forge: 'Picks and gear', smelt: 'Ingots sell more' },
+    traits: ['Grafter', 'Tippler', 'Sturdy', 'Greedy', 'Grumbler', 'Merry', 'Lucky', 'Stubborn'],
+    blocks: { rock: 'Rock', vein: 'Seam', cave: 'Cavern', crystal: 'Crystal', water: 'Water' },
+    build: 'Build', upgrade: 'Upgrade', lvl: 'Lv.', maxed: 'Maxed',
+    depth: 'm', stone: 'Stone', gold: 'Gold', ale: 'Ale', gems: 'Gems', mush: 'Mushrooms',
+    dwarves: 'Dwarves', pick: 'Pick', gear: 'Gear', cart: 'Cart',
+    caravan: 'Caravan', contracts: 'Contracts', forgeT: 'Forge', sellAll: 'Sell all',
+    hire: 'Hire', found: 'A lost dwarf!',
+    sellX2: 'Sell x2', reward: 'Reward', deliver: 'Deliver', reroll: 'Reroll',
+    task: { dig: 'Digging', room: 'Working', sleep: 'Asleep', drink: 'Drinking', idle: 'Idle', walk: 'Walking' },
+    offline: 'While you were away', mined: 'Mined', x2: 'x2 for an ad', ok: 'Great',
+    rage: 'Dwarven Rage', rageOn: 'Rage! x5 damage', instant: 'Finish now', callDwarf: 'Call a dwarf',
+    noBeds: 'Bunks needed!', noAle: 'Out of ale!', full: 'Storage full', ad: 'AD',
+    needSupports: 'A hall is needed',
+    newStratum: 'New seam', mark: 'Order', order: 'Dig this first',
+    tut: ['Tap the rock blocks', 'Dig deeper', 'Tap the green plus',
+          'Bunks draw dwarves in', 'Build an ore mine'],
+    hint: 'Long-press a block to dig it first',
+    daily: 'Daily gift', day: 'Day', caravanHere: 'Caravan at the gates!',
+    bonus: 'Price +25%', tierAt: 'Tier', effGear: 'Power', effOff: 'Offline',
+    mile: 'Milestone', colony: 'Colony',
+  },
+};
+let T = I18N.ru;
+
+/* ═══════════════ Звук ═══════════════
+   Фасад над shared/sfx.js: слоёные рецепты вместо одноосцилляторных бипов,
+   генеративная музыка «mine» и пещерный эмбиент. Музыка стартует после
+   первого жеста (мобильные браузеры) и глушится вместе со всем остальным. */
+const Sound = (() => {
+  let started = false;
+  const wantAudio = () => !(st && st.muted);
+  function startBeds() { SFX.music.start('mine', .4); SFX.amb.start('cave'); }
+  return {
+    unlock() {
+      SFX.unlock();
+      if (!started && wantAudio()) { started = true; startBeds(); }
+    },
+    setMuted(m) {
+      SFX.setMuted(m);                       // true гасит и музыку с эмбиентом
+      if (!m && started) startBeds();        // после рекламы/возврата — поднять
+    },
+    intensity(i) { SFX.music.set(i); },      // накал музыки от жизни колонии
+    hit() { SFX.play('pick', { v: .75 }); },
+    scav() { SFX.play('dig', { v: .55 }); },
+    crack() { SFX.play('thud', { v: .85 }); SFX.play('dig', { v: .3, t: .02 }); },
+    breakthrough() { SFX.play('reveal', { v: .85 }); },
+    stratum() { SFX.play('fanfare', { v: .65 }); },
+    build() { SFX.play('chop', { v: .85 }); SFX.play('thud', { v: .55, t: .09 }); },
+    open() { SFX.play('open', { v: .7 }); },
+    close() { SFX.play('close', { v: .6 }); },
+    coins(n) { SFX.play('coins', { n: Math.min(n || 3, 6), v: .8 }); },
+    gem() { SFX.play('spark', { v: .85 }); },
+    upgrade() { SFX.play('levelup', { v: .6 }); },
+    clang() { SFX.play('clang', { v: .75 }); },
+    error() { SFX.play('error', { v: .6 }); },
+    found() { SFX.play('reveal', { v: .7 }); SFX.play('combo', { n: 4, t: .15, v: .8 }); },
+    caravan() { SFX.play('bell', { v: .5 }); },
+    deliver() { SFX.play('star', { v: .75 }); SFX.play('coins', { n: 5, t: .05, v: .8 }); },
+    rage() { SFX.play('explode', { v: .45 }); SFX.play('clang', { v: .55, t: .12 }); },
+    daily() { SFX.play('fanfare', { v: .75 }); },
+    mark(on) { SFX.play('toggle', { on: !!on, v: .9 }); },
+    mile() { SFX.play('levelup', { v: .7 }); },
+    lvlup(n) { SFX.play('combo', { n: Math.min(n, 9), v: .45 }); },
+  };
+})();
+
+/* ═══════════════ Числа (из симулятора) ═══════════════ */
+const CFG = {
+  GROWTH: 1.12,
+  T_START: 200, T_PLATO: 242, T_RAMP: 30, T_DRIFT: 1.5, PILA_POW: 0.5,
+  PICK_D0: 2, PICK_STEP: 2.35,
+  PICK_YARUS: [1, 8, 15, 22, 29, 36, 44, 52, 60, 68, 76, 84, 92, 100, 108, 116]
+    .concat(Array.from({ length: 60 }, (_, i) => 124 + i * 8)),
+  DIGGER: 0.55, BLOCK_W: 7,
+  // ЯРУСЫ ОДИНАКОВЫЕ: два ряда блоков, один ярус — один уровень зданий (два зала).
+  // Схема «1→2→3 ряда с двухэтажным залом на глубине» отвергнута на плейтесте:
+  // двухэтажность не читалась, а ждать три яруса до первой стройки было долго.
+  // CALIB — точка калибровки: hp = REF × T × ROWS / CALIB, поэтому время на ОДИН
+  // блок не зависит от числа рядов, меняется только длина яруса.
+  ROWS: 2, CALIB: 3,
+  FACE_W: 0.12,
+  // Камня за пробой поднято со 100: при двух слотах на ярусе прежнего хватало
+  // на 0.4 комнаты, и плашки «+» стояли пустыми часами. Теперь на 0.63.
+  STONE0: 150, GOLD0: 0.55, ORE_RATE: 0.08,
+  C_ROOM: 240, C_PICK: 1100, C_GEAR: 900, GEAR_COST_STEP: 1.5, GEAR_STEP: 1.15,
+  C_CART: 600, CART_COST_STEP: 1.5, CART_MAX: 5,
+  ROOM_LVL_MAX: 5, ROOM_LVL_MULT: 1.55, ROOM_LVL_COST: 1.9, C_ROOM_LVL: 420,
+  IMMIGRATE: 60, POP_CAP: 24,
+  UPTIME_FULL: 0.75, LEVEL_MAX: 10, LEVEL_STEP: 0.08,
+  WORK_SPAN: 300, SLEEP_BED: 90, SLEEP_FLOOR: 210, DRINK_SPAN: 30,
+  MOOD_SPAN: 900, MOOD_LO: 0.70, MOOD_HI: 1.30,
+  FAT_SLEEP: 85, MOOD_DRINK: 25,
+  WALK: 30, SHAFT_SPEED: 2.6,   // по стволу быстрее: это лифт, иначе дварфы из верхних
+                                // залов шли к глубокому забою полминуты и он пустовал
+  MIN_DIGGERS: 2,
+  // КРЕПЬ: забой не дальше стольких ярусов от самой глубокой комнаты. Введена после
+  // плейтеста betav1 — «дварфы убегают вниз, а зданиям вечно есть место где-то ниже».
+  // Симулятор: обязательный зал съедает 72% камня со своих пробоев.
+  SUPPORT_SPAN: 4,
+  // Клапан от тупика: камень падает только с пробоя, а крепь пробой запрещает.
+  // Если игрок растратил камень, не поставив зал, — застрял бы навсегда. Поэтому
+  // запертые дварфы «разбирают завал»: приносят камень понемногу.
+  SCAV: 1.0,
+  MUSH_RATE: 0.12, ALE_IN: 3, ALE_RATE: 0.06, SMELT_TIME: 40, INGOT_MULT: 2.5,
+  // Эля за секунду питья. Выведено из симулятора: цикл настроения ~705 с, из них
+  // 30 с в таверне, расход 0.004/с на дварфа → 0.1/с пока пьёт. Было «1 единица
+  // в секунду» — вдесятеро больше, и одна пивоварня не могла напоить никого.
+  ALE_DRINK: 0.1,
+  STORE0: 900, STORE_STEP: 0.75,
+  OFF_DIG: 0.02, OFF_PROD: 0.35, OFF_PROD_STEP: 1.12, OFF_PROD_MAX: 0.75,
+  OFF_WINDOW: 8 * 3600, OFF_WINDOW_STEP: 2 * 3600, OFF_CAP: 24 * 3600,
+  CARAVAN_EVERY: 600, CARAVAN_CD: 60,
+  // Пока фургон у ворот, цена продажи выше — иначе таймер каравана чисто
+  // декоративный: продать можно в любой момент, и «3:22» на кнопке ничего
+  // не значит. Теперь прибытие — событие, которого есть смысл ждать.
+  CARAVAN_BONUS: 1.25,
+  // Раж v2 бьёт и по дварфам: в идл-игре с двумя дюжинами копателей ×5 только
+  // к тапу игрока к середине игры не значил ничего, и rewarded обесценивался.
+  RAGE_TIME: 60, RAGE_MULT: 5,
+  // Ежедневный вход: золото масштабируется глубиной, самоцветы — константа
+  // (единственная твёрдая валюта). Пропуск больше суток сбрасывает серию.
+  DAILY: [{ g: 60 }, { gem: 4 }, { g: 90 }, { gem: 6 }, { g: 140 }, { gem: 8 }, { g: 200, gem: 10 }],
+  // Вехи: маленькая награда самоцветами за естественные рубежи — глубина в
+  // метрах, размер колонии, первая таверна и плавильня. Не механика, а
+  // отметка на пути: тост, фанфара, +самоцветы. Старый сейв догоняет по одной.
+  MILES: [['m100', 3], ['m200', 4], ['m400', 6], ['m800', 8], ['p6', 3], ['p12', 5], ['p24', 8], ['tav', 4], ['smelt', 5]],
+  // Самоцветы покупают ровно то же, что и реклама. Без этого они копились впустую:
+  // единственная валюта в игре, у которой не было ни одного стока.
+  GEM_INSTANT: 6, GEM_RAGE: 4, GEM_DWARF: 10,
+  // Пути пополнения колонии. Одной иммиграции мало: ждать её нечем занять, и она
+  // упирается в койки. Теперь их четыре — койка, найм, каверна, реклама/самоцветы.
+  C_HIRE: 350, HIRE_STEP: 1.10,   // наём у каравана за золото, дорожает с населением
+  // Шанс найти заблудившегося в каверне. На 0.16 каверны стали ГЛАВНЫМ источником
+  // колонии и обесценили и койки, и найм — оставляю приятной редкостью.
+  CAVE_DWARF: 0.06,
+  INTER_CD: 180,
+  SAVE_V: 1,
+};
+
+// Глубокие границы растянуты под укороченный ярус: иначе именованные пласты
+// выгорали за пять дней. Ранние оставлены на месте — первый штрек нужен в первые
+// три минуты, а растянув и их, я отодвинул его на четвёртую.
+const STRATA = [
+  { from: 1,   ore: -1, rock: '#5d4028', dark: '#3a2718', hall: '#7a5636', oreCol: '#8a6a3a' },
+  { from: 6,   ore: 1,  rock: '#a89e84', dark: '#6e6550', hall: '#c4bba2', oreCol: '#c07a3a' },
+  { from: 18,  ore: 2,  rock: '#76737f', dark: '#4b4954', hall: '#918e9c', oreCol: '#b9c0c8' },
+  { from: 36,  ore: 3,  rock: '#454250', dark: '#2a2833', hall: '#5e5a6c', oreCol: '#e2e9f0' },
+  { from: 60,  ore: 4,  rock: '#382e4a', dark: '#211a2e', hall: '#4e4166', oreCol: '#7fd8e8' },
+  { from: 92,  ore: 5,  rock: '#472d3a', dark: '#2b1a23', hall: '#613e50', oreCol: '#8ef08e' },
+  { from: 140, ore: 5,  rock: '#272031', dark: '#15111c', hall: '#3a3049', oreCol: '#8ef08e' },
+];
+const stratumIdx = n => { let i = 0; STRATA.forEach((s, j) => { if (n >= s.from) i = j; }); return i; };
+const stratum = n => STRATA[stratumIdx(n)];
+
+/* ── формулы ── */
+const E = n => Math.pow(CFG.GROWTH, n - 1);
+const pickTier = n => { let t = 0; CFG.PICK_YARUS.forEach((y, i) => { if (n >= y) t = i; }); return t; };
+const pickStart = n => CFG.PICK_YARUS[pickTier(n)];
+const pickDmg = t => CFG.PICK_D0 * Math.pow(CFG.PICK_STEP, t);
+const rowsOf = () => CFG.ROWS;
+const slotsOf = () => 2;
+const expFace = n => Math.max(2, Math.min(CFG.BLOCK_W, Math.round(2 + n / 8)));
+const expLevel = n => Math.min(CFG.LEVEL_MAX, 1 + n / 15);
+const levelM = l => 1 + CFG.LEVEL_STEP * (l - 1);
+const dwarfM = n => CFG.UPTIME_FULL * levelM(expLevel(n)) * 1.03;
+const REF = n => pickDmg(pickTier(n)) * (1 + CFG.FACE_W * (expFace(n) - 1) * dwarfM(n));
+function Tcurve(n) {
+  const k = Math.min(1, (n - 1) / (CFG.T_RAMP - 1));
+  const base = CFG.T_START + (CFG.T_PLATO - CFG.T_START) * k;
+  const drift = 1 + (CFG.T_DRIFT - 1) * Math.max(0, n - CFG.T_RAMP) / 90;
+  return base * drift * Math.pow(CFG.GROWTH, (n - pickStart(n)) * CFG.PILA_POW);
+}
+const hpOf = n => REF(n) * Tcurve(n) * CFG.ROWS / CFG.CALIB;
+const blockHpBase = n => hpOf(n) / (CFG.BLOCK_W * CFG.ROWS);
+const stoneOf = n => CFG.STONE0 * E(n);
+const goldRate = n => CFG.GOLD0 * E(n);
+const orePrice = oi => {
+  const s = STRATA.find(x => x.ore === oi);
+  const mid = Math.round((s.from + (STRATA[STRATA.indexOf(s) + 1] ? STRATA[STRATA.indexOf(s) + 1].from - 1 : s.from + 30)) / 2);
+  return goldRate(mid) / (CFG.ORE_RATE * 2);
+};
+
+/* ── блоки ── */
+const BTYPE = { rock: 1, vein: 2.5, cave: 0.1, crystal: 5, water: 6 };
+const hash = v => { let x = (v * 2654435761) % 4294967296; x ^= x >>> 15; x = (x * 2246822519) % 4294967296; return (x >>> 0) / 4294967296; };
+function blockType(y, row, col) {
+  const s = stratum(y), r = hash(y * 9973 + row * 331 + col * 17 + 7);
+  if (y >= 31 && r < 0.04) return 'water';
+  if (y >= 16 && r < 0.08) return 'crystal';
+  if (r < 0.20) return 'cave';
+  if (s.ore > 0 && r < 0.46) return 'vein';
+  return 'rock';
+}
+
+/* ── комнаты ── */
+const ROOMDEF = [
+  { t: 'bed',    at: 1,  k: 1.0, hands: 0 },   // с первого же яруса: ждать стройку было долго
+  { t: 'mine',   at: 6,  k: 1.0, hands: 2 },
+  { t: 'forge',  at: 8,  k: 1.4, hands: 0 },
+  { t: 'farm',   at: 11, k: 0.9, hands: 2 },
+  { t: 'store',  at: 14, k: 1.2, hands: 0 },
+  { t: 'brew',   at: 18, k: 1.3, hands: 2 },
+  { t: 'tavern', at: 23, k: 1.8, hands: 0 },
+  { t: 'smelt',  at: 30, k: 1.6, hands: 2 },
+];
+const roomDef = t => ROOMDEF.find(r => r.t === t);
+const roomCost = (t, y) => CFG.C_ROOM * roomDef(t).k * E(y);
+const roomLvlCost = (y, lvl) => CFG.C_ROOM_LVL * E(y) * Math.pow(CFG.ROOM_LVL_COST, lvl - 1);
+const roomOut = lvl => Math.pow(CFG.ROOM_LVL_MULT, lvl - 1);
+
+/* ── черты ── */
+const TRAITS = [
+  { speed: 1.15, fat: 1.4 }, { moodRate: 2, drink: 2 }, { fat: 0.5 }, { ore: 1.2 },
+  { aura: -6 }, { aura: 6 }, { gem: 1.15 }, { stubborn: true },
+];
+const N1 = ['ТОР', 'БАЛ', 'ДУР', 'ГИМ', 'ДВА', 'НА', 'БО', 'ОИН', 'ГЛО', 'ФРЕ', 'ТРА', 'КИ', 'ФИ', 'НО', 'ДО', 'ОР'];
+const N2 = ['ИН', 'ОР', 'УР', 'АР', 'ЛИ', 'ДАР', 'РИН', 'МУНД'];
+const SUR = ['КРЕПКОРУК', 'КАМНЕБОРОД', 'ЗЛАТОКОП', 'ЖЕЛЕЗНОЛОБ', 'ТИХОКИРК', 'РУДОЗНАТЕЦ', 'МЕДОВАР', 'СКАЛОЛОМ'];
+const N1E = ['THOR', 'BAL', 'DUR', 'GIM', 'DWA', 'NA', 'BO', 'OIN', 'GLO', 'FRE', 'TRA', 'KI', 'FI', 'NO', 'DO', 'OR'];
+const N2E = ['IN', 'OR', 'UR', 'AR', 'LI', 'DAR', 'RIN', 'MUND'];
+const SURE = ['STRONGARM', 'STONEBEARD', 'GOLDPICK', 'IRONBROW', 'QUIETPICK', 'ORESEER', 'MEADWRIGHT', 'CRAGBREAKER'];
+
+/* ═══════════════ Пиксельный конвейер ═══════════════ */
+const screenCv = document.getElementById('game');
+const sctx = screenCv.getContext('2d');
+const buf = document.createElement('canvas');
+const ctx = buf.getContext('2d');
+let S = 4, LW = 125, LH = 270;
+
+function mk(rows, pal) {
+  const h = rows.length, w = rows[0].length;
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  const x = c.getContext('2d');
+  rows.forEach((row, y) => { for (let i = 0; i < row.length; i++) { const col = pal[row[i]]; if (col) { x.fillStyle = col; x.fillRect(i, y, 1, 1); } } });
+  return c;
+}
+function outline(src, col = '#1a1220') {
+  const w = src.width + 2, h = src.height + 2;
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  const x = c.getContext('2d');
+  x.drawImage(src, 1, 1);
+  const d = x.getImageData(0, 0, w, h), a = d.data;
+  const solid = (i, j) => i >= 0 && j >= 0 && i < w && j < h && a[(j * w + i) * 4 + 3] > 0;
+  x.fillStyle = col;
+  for (let j = 0; j < h; j++) for (let i = 0; i < w; i++)
+    if (a[(j * w + i) * 4 + 3] === 0 && (solid(i + 1, j) || solid(i - 1, j) || solid(i, j + 1) || solid(i, j - 1)))
+      x.fillRect(i, j, 1, 1);
+  return c;
+}
+const SPRITES = {};
+const SW = n => SPRITES[n].width, SH = n => SPRITES[n].height;
+function spr(name, x, y) { ctx.drawImage(SPRITES[name], Math.round(x), Math.round(y)); }
+const R = (x, y, w, h, c) => { ctx.fillStyle = c; ctx.fillRect(Math.round(x), Math.round(y), Math.round(w), Math.round(h)); };
+
+/* «Дорогой» пиксель-арт из тех же прямоугольников: производные оттенки и
+   трёхтоновые фаски. shade кэшируется — вызовов сотни за кадр. */
+const _sh = {};
+function shade(c, f) {
+  const k = c + '|' + f;
+  if (_sh[k]) return _sh[k];
+  const n = parseInt(c.slice(1), 16);
+  const ch = v => Math.max(0, Math.min(255, Math.round(v)));
+  const r = ch(((n >> 16) & 255) * f), g = ch(((n >> 8) & 255) * f), b = ch((n & 255) * f);
+  return _sh[k] = '#' + ((1 << 24) | (r << 16) | (g << 8) | b).toString(16).slice(1);
+}
+function slab(x, y, w, h, c) {
+  R(x, y, w, h, c);
+  R(x, y, w, 1, shade(c, 1.35)); R(x, y + h - 1, w, 1, shade(c, .55));
+  R(x, y, 1, h, shade(c, 1.12)); R(x + w - 1, y, 1, h, shade(c, .7));
+}
+
+/* ═══════════════ Битмап-шрифт 5×7 ═══════════════ */
+const GLYPHS = {
+  A:'.###.|#...#|#...#|#####|#...#|#...#|#...#', B:'####.|#...#|#...#|####.|#...#|#...#|####.',
+  C:'.####|#....|#....|#....|#....|#....|.####', D:'####.|#...#|#...#|#...#|#...#|#...#|####.',
+  E:'#####|#....|#....|####.|#....|#....|#####', F:'#####|#....|#....|####.|#....|#....|#....',
+  G:'.####|#....|#....|#..##|#...#|#...#|.###.', H:'#...#|#...#|#...#|#####|#...#|#...#|#...#',
+  I:'#####|..#..|..#..|..#..|..#..|..#..|#####', J:'....#|....#|....#|....#|#...#|#...#|.###.',
+  K:'#...#|#..#.|#.#..|##...|#.#..|#..#.|#...#', L:'#....|#....|#....|#....|#....|#....|#####',
+  M:'#...#|##.##|#.#.#|#.#.#|#...#|#...#|#...#', N:'#...#|##..#|#.#.#|#.#.#|#..##|#...#|#...#',
+  O:'.###.|#...#|#...#|#...#|#...#|#...#|.###.', P:'####.|#...#|#...#|####.|#....|#....|#....',
+  Q:'.###.|#...#|#...#|#...#|#.#.#|#..#.|.##.#', R:'####.|#...#|#...#|####.|#.#..|#..#.|#...#',
+  S:'.####|#....|#....|.###.|....#|....#|####.', T:'#####|..#..|..#..|..#..|..#..|..#..|..#..',
+  U:'#...#|#...#|#...#|#...#|#...#|#...#|.###.', V:'#...#|#...#|#...#|#...#|#...#|.#.#.|..#..',
+  W:'#...#|#...#|#...#|#.#.#|#.#.#|##.##|#...#', X:'#...#|#...#|.#.#.|..#..|.#.#.|#...#|#...#',
+  Y:'#...#|#...#|.#.#.|..#..|..#..|..#..|..#..', Z:'#####|....#|...#.|..#..|.#...|#....|#####',
+  'Б':'####.|#....|#....|####.|#...#|#...#|####.', 'Г':'#####|#....|#....|#....|#....|#....|#....',
+  'Д':'.####|.#..#|.#..#|.#..#|.#..#|#####|#...#', 'Ж':'#.#.#|#.#.#|#.#.#|#####|#.#.#|#.#.#|#.#.#',
+  'З':'####.|....#|....#|.###.|....#|....#|####.', 'И':'#...#|#...#|#..##|#.#.#|##..#|#...#|#...#',
+  'Й':'.###.|#...#|#..##|#.#.#|##..#|#...#|#...#', 'Л':'..###|.##.#|.#..#|.#..#|.#..#|.#..#|#...#',
+  'П':'#####|#...#|#...#|#...#|#...#|#...#|#...#', 'У':'#...#|#...#|#...#|.####|....#|#...#|.###.',
+  'Ф':'..#..|.###.|#.#.#|#.#.#|#.#.#|.###.|..#..', 'Ц':'#..#.|#..#.|#..#.|#..#.|#..#.|#####|....#',
+  'Ч':'#...#|#...#|#...#|.####|....#|....#|....#', 'Ш':'#.#.#|#.#.#|#.#.#|#.#.#|#.#.#|#.#.#|#####',
+  'Щ':'#.#.#|#.#.#|#.#.#|#.#.#|#.#.#|#####|....#', 'Ъ':'##...|.#...|.#...|.###.|.#..#|.#..#|.###.',
+  'Ы':'#...#|#...#|##..#|#.#.#|#.#.#|#.#.#|##..#', 'Ь':'#....|#....|#....|####.|#...#|#...#|####.',
+  'Э':'####.|....#|....#|.####|....#|....#|####.', 'Ю':'#.##.|#.#.#|#.#.#|###.#|#.#.#|#.#.#|#.##.',
+  'Я':'.####|#...#|#...#|.####|..#.#|.#..#|#...#',
+  '0':'.###.|#...#|#..##|#.#.#|##..#|#...#|.###.', '1':'..#..|.##..|..#..|..#..|..#..|..#..|.###.',
+  '2':'.###.|#...#|....#|...#.|..#..|.#...|#####', '3':'#####|...#.|..##.|....#|....#|#...#|.###.',
+  '4':'...#.|..##.|.#.#.|#..#.|#####|...#.|...#.', '5':'#####|#....|####.|....#|....#|#...#|.###.',
+  '6':'..##.|.#...|#....|####.|#...#|#...#|.###.', '7':'#####|....#|...#.|..#..|.#...|.#...|.#...',
+  '8':'.###.|#...#|#...#|.###.|#...#|#...#|.###.', '9':'.###.|#...#|#...#|.####|....#|...#.|.##..',
+  '.':'.....|.....|.....|.....|.....|.##..|.##..', ',':'.....|.....|.....|.....|.##..|.##..|.#...',
+  ':':'.....|.##..|.##..|.....|.##..|.##..|.....', '!':'..#..|..#..|..#..|..#..|..#..|.....|..#..',
+  '?':'.###.|#...#|....#|...#.|..#..|.....|..#..', '-':'.....|.....|.....|#####|.....|.....|.....',
+  '+':'.....|..#..|..#..|#####|..#..|..#..|.....', '/':'....#|....#|...#.|..#..|.#...|#....|#....',
+  '(':'...#.|..#..|.#...|.#...|.#...|..#..|...#.', ')':'.#...|..#..|...#.|...#.|...#.|..#..|.#...',
+  '%':'##..#|##.#.|..#..|.#...|#.##.|..##.|.....', '×':'.....|#...#|.#.#.|..#..|.#.#.|#...#|.....',
+  '↑':'..#..|.###.|#.#.#|..#..|..#..|..#..|.....', '↓':'.....|..#..|..#..|..#..|#.#.#|.###.|..#..',
+  '*':'.....|#.#.#|.###.|#####|.###.|#.#.#|.....', "'":'..#..|..#..|.....|.....|.....|.....|.....',
+  '→':'.....|..#..|...#.|#####|...#.|..#..|.....',
+  'М':'#...#|##.##|#.#.#|#.#.#|#...#|#...#|#...#',
+};
+Object.assign(GLYPHS, { 'А': GLYPHS.A, 'В': GLYPHS.B, 'Е': GLYPHS.E, 'Ё': GLYPHS.E, 'К': GLYPHS.K,
+  'Н': GLYPHS.H, 'О': GLYPHS.O, 'Р': GLYPHS.P, 'С': GLYPHS.C, 'Т': GLYPHS.T, 'Х': GLYPHS.X });
+const FONT = {}, FONT_H = 7, SPACE_W = 3, LETTER_SP = 1;
+(function () {
+  for (const ch in GLYPHS) {
+    const rows = GLYPHS[ch].split('|');
+    let lo = 5, hi = -1;
+    for (let c = 0; c < 5; c++) for (let r = 0; r < FONT_H; r++)
+      if (rows[r][c] === '#') { if (c < lo) lo = c; if (c > hi) hi = c; }
+    if (hi < 0) { FONT[ch] = { rows: [], w: SPACE_W }; continue; }
+    FONT[ch] = { rows: rows.map(r => r.slice(lo, hi + 1)), w: hi - lo + 1 };
+  }
+  FONT[' '] = { rows: [], w: SPACE_W };
+})();
+function textW(s) { let w = 0; for (const ch of String(s).toUpperCase()) w += (FONT[ch] || FONT[' ']).w + LETTER_SP; return Math.max(0, w - LETTER_SP); }
+function paintText(s, x, y, col) {
+  ctx.fillStyle = col; let cx = x;
+  for (const ch of String(s).toUpperCase()) {
+    const g = FONT[ch] || FONT[' '];
+    for (let r = 0; r < g.rows.length; r++) { const row = g.rows[r];
+      for (let c = 0; c < row.length; c++) if (row[c] === '#') ctx.fillRect(cx + c, y + r, 1, 1); }
+    cx += g.w + LETTER_SP;
+  }
+}
+function text(s, x, y, col, shadow = '#140e1c') {
+  x = Math.round(x); y = Math.round(y);
+  if (shadow) paintText(s, x + 1, y + 1, shadow);
+  paintText(s, x, y, col);
+}
+const textC = (s, cx, y, col, sh) => text(s, Math.round(cx - textW(s) / 2), y, col, sh);
+const textR = (s, rx, y, col, sh) => text(s, Math.round(rx - textW(s)), y, col, sh);
+function fitText(s, maxW) {
+  s = String(s);
+  if (textW(s) <= maxW) return s;
+  while (s.length > 1 && textW(s + '.') > maxW) s = s.slice(0, -1);
+  return s + '.';
+}
+const fmt = v => {
+  const a = Math.abs(v);
+  if (a >= 1e12) return (v / 1e12).toFixed(1) + 'T';
+  if (a >= 1e9) return (v / 1e9).toFixed(1) + (T === I18N.ru ? 'Б' : 'B');
+  if (a >= 1e6) return (v / 1e6).toFixed(1) + (T === I18N.ru ? 'М' : 'M');
+  if (a >= 1e4) return (v / 1e3).toFixed(1) + (T === I18N.ru ? 'К' : 'K');
+  return String(Math.round(v));
+};
+const clock = s => { s = Math.max(0, Math.round(s)); const m = (s / 60) | 0; return m + ':' + String(s % 60).padStart(2, '0'); };
+
+/* ═══════════════ Спрайты ═══════════════ */
+const HAIR_N = 4;
+// зеркало для профильных спрайтов: дварфы v2 смотрят вбок, ходят в обе стороны
+function flipH(src) {
+  const c = document.createElement('canvas'); c.width = src.width; c.height = src.height;
+  const x = c.getContext('2d');
+  x.translate(src.width, 0); x.scale(-1, 1); x.drawImage(src, 0, 0);
+  return c;
+}
+function buildSprites() {
+  // Дварф v2: 12×20 в профиль (по ART.md просвет зала пускает до ~21 px с
+  // обводкой). Борода — отдельная масса, шлем с налобником, кирка узнаваемой
+  // формы. Четыре масти бороды: рыжая, бурая, седая, соломенная.
+  const HAIRS = [['#c2542c', '#8f3a1c'], ['#8a5a30', '#5f3a1c'], ['#b8b0a4', '#7a746a'], ['#d9a441', '#a3742a']];
+  // общая верхняя половина: шлем, лицо с глазом, борода на грудь
+  const HEAD = [
+    '....mmmm....',
+    '...mmmmmm...',
+    '..mmmmmmmm..',
+    '..MMMMMMMM..',
+    '...sssssks..',
+    '...sssssss..',
+    '..hhhhhhhhh.',
+    '..hhhhhhhhh.',
+    '.hhhHhhhhHh.',
+    '.hhhhhhhhhh.',
+    '.hhHhhhhhhh.',
+    '..hhhhhhhh..',
+    '..hhhhhhh...',
+    '...hhhhh....',
+    '...CCCCC....',
+  ];
+  const LEGS_A = ['...cc.cc....', '...cc.cc....', '...kk.kk....', '..kkk.kkk...'];   // стоит
+  const LEGS_B = ['..cc...cc...', '..cc...cc...', '..kk...kk...', '.kkk...kkk..'];   // шаг
+  HAIRS.forEach((hp, v) => {
+    const P = { h: hp[0], H: hp[1], s: '#e8b48a', c: '#3f6ba8', C: '#2b4a78',
+                k: '#4a3420', m: '#9aa4ae', M: '#6a7078', p: '#c8ccd2', w: '#8a5f36' };
+    const stand = HEAD.concat(LEGS_A), step = HEAD.concat(LEGS_B);
+    // кирка за плечом (замах): лезвие — диагональный клин, а не блоб,
+    // иначе на 6× оно читалось белым рогом над шлемом
+    const dig1 = stand.map((r, i) => {
+      if (i === 0) return '....mmmm.pp.';
+      if (i === 1) return '...mmmmmm.pp';
+      if (i === 2) return '..mmmmmmmm.p';
+      if (i === 3) return '..MMMMMMMMw.';
+      if (i === 4) return '...sssssksw.';
+      if (i === 5) return '...ssssssscc';
+      if (i === 6) return '..hhhhhhhhcc';
+      return r;
+    });
+    // кирка ударила вниз — рукоять по диагонали, лезвие у земли
+    const dig2 = stand.map((r, i) => {
+      if (i === 6) return '..hhhhhhhhc.';
+      if (i === 7) return '..hhhhhhhhcc';
+      if (i === 8) return '.hhhHhhhhHw.';
+      if (i === 9) return '.hhhhhhhhhw.';
+      if (i === 10) return '.hhHhhhhhhww';
+      if (i === 11) return '..hhhhhhhh.w';
+      if (i === 12) return '..hhhhhhh..w';
+      if (i === 13) return '...hhhhh...w';
+      if (i === 14) return '...CCCCC..pw';
+      if (i === 15) return '...cc.cc..pp';
+      if (i === 16) return '...cc.cc..pp';
+      return r;
+    });
+    // спит: свернулся на боку, шлем не снимает
+    const sleep = [
+      '.....hhhh.....',
+      '.mm.hhhhhh....',
+      'mmmshhhhhhh...',
+      'mmsshhhhhhhcc.',
+      '.msshhhhhhccc.',
+      '..shhhhhhcccck',
+      '...hhhhh.kk.kk',
+    ];
+    SPRITES['dwarf_' + v] = outline(mk(stand, P));
+    SPRITES['dwarf2_' + v] = outline(mk(step, P));
+    SPRITES['miner_' + v] = outline(mk(dig1, P));
+    SPRITES['miner2_' + v] = outline(mk(dig2, P));
+    SPRITES['sleep_' + v] = outline(mk(sleep, P));
+    ['dwarf_', 'dwarf2_', 'miner_', 'miner2_', 'sleep_'].forEach(n =>
+      SPRITES[n + v + 'L'] = flipH(SPRITES[n + v]));
+  });
+  SPRITES.dwarf = SPRITES.dwarf_0; SPRITES.miner = SPRITES.miner_0;
+  const T1 = { w: '#6b4a2a', f: '#ffcf5c', o: '#ff8a2b' };
+  SPRITES.torch = outline(mk(['.o.', 'fof', '.f.', '.w.'], T1), '#241830');
+  SPRITES.torch2 = outline(mk(['.f.', 'ofo', '.o.', '.w.'], T1), '#241830');
+  // мебель v2 крупнее — под рост дварфа 20 px: бочка по пояс, койка в рост
+  const BD = { w: '#7a5230', W: '#4a3420', l: '#d8d0c0', a: '#8a4a3a', A: '#6a3428' };
+  SPRITES.bed = outline(mk([
+    'w..............w',
+    'wllaaaaaaaaaaa.w',
+    'wllAaaaaaaaaaa.w',
+    'wWWWWWWWWWWWWWWw',
+    'w..............w'], BD));
+  const CR = { m: '#8a8f96', M: '#5a5f66', o: '#c07a3a', w: '#4a3a28' };
+  SPRITES.cart = outline(mk([
+    'm...........m',
+    'mooo.oooo.oom',
+    'mooooooooooom',
+    'mooooooooooom',
+    'MMMMMMMMMMMMM',
+    '..ww.....ww..',
+    '..ww.....ww..'], CR));
+  const BR = { w: '#7a5230', W: '#4a3420', a: '#c98a3a', h: '#8a8f96' };
+  SPRITES.barrel = outline(mk([
+    '.wwwwwww.',
+    'wWaaaaaWw',
+    'waaaaaaaw',
+    'hhhhhhhhh',
+    'waaaaaaaw',
+    'waaaaaaaw',
+    'hhhhhhhhh',
+    'waaaaaaaw',
+    'wWWWWWWWw',
+    '.wwwwwww.'], BR));
+  // чан пивоварни — большой, с паром покажет roomProps
+  SPRITES.vat = outline(mk([
+    '.wwwwwwwww.',
+    'wWWWWWWWWWw',
+    'waaaaaaaaaw',
+    'waaaaaaaaaw',
+    'hhhhhhhhhhh',
+    'waaaaaaaaaw',
+    'waaaaaaaaaw',
+    'hhhhhhhhhhh',
+    'waaaaaaaaaw',
+    'wWWWWWWWWWw',
+    '.wwwwwwwww.'], BR));
+  SPRITES.mug = outline(mk(['wwww.', 'waaww', 'waaw.', 'wwww.'], { w: '#c8c0b0', a: '#c98a3a' }));
+  SPRITES.mush = outline(mk([
+    '..rrr..',
+    '.rrrrr.',
+    'rrRRrrr',
+    'rrrrrrr',
+    '..sss..',
+    '..sss..',
+    '.sssss.'], { r: '#d05a5a', R: '#f0d0d0', s: '#e8dcc8' }));
+  const FG = { s: '#5a5f66', S: '#3a3f46', f: '#ff8a2b', F: '#ffcf5c', a: '#8a8f96' };
+  SPRITES.anvil = outline(mk([
+    '.aaaaaaaaa..',
+    'aaaaaaaaaaa.',
+    '..aaaaaa....',
+    '...aaaa.....',
+    '..SSSSSS....',
+    '..SSSSSS....',
+    '.SSSSSSSS...'], FG));
+  SPRITES.furnace = outline(mk([
+    '...sss......',
+    '...sss......',
+    'ssssssssssss',
+    'ssssssssssss',
+    'ss.ffff...ss',
+    'ss.fFFf...ss',
+    'ss.fFFf...ss',
+    'ss.ffff...ss',
+    'ssssssssssss',
+    'sSSSSSSSSSss',
+    'ssssssssssss'], FG));
+  const CH = { w: '#7a5230', W: '#4a3420', g: '#c9a227' };
+  SPRITES.crate = outline(mk([
+    'wwwwwwwww',
+    'wgggggggw',
+    'wgWWWWWgw',
+    'wgggggggw',
+    'wWWWWWWWw',
+    'wwwwwwwww'], CH));
+  // ворота — каменная арка с дубовыми створками, в рост дварфа
+  const GT = { s: '#6a6f78', S: '#474d61', w: '#7a5230', W: '#4a3420', g: '#c9a227' };
+  SPRITES.gate = outline(mk([
+    '.....ssssssssssssssss.....',
+    '...ssssssssssssssssssss...',
+    '..ssSSSSSSSSSSSSSSSSSSss..',
+    '.ssSS................SSss.',
+    '.ssS..wwwwwwwwwwwwww..Sss.',
+    'ssSS..wWWWWWwwWWWWWw..SSss',
+    'ssS...wWwwwWwwWwwwWw...Sss',
+    'ssS...wWwgwWwwWwgwWw...Sss',
+    'ssS...wWwwwWwwWwwwWw...Sss',
+    'ssS...wWWWWWwwWWWWWw...Sss',
+    'ssS...wWwwwWwwWwwwWw...Sss',
+    'ssS...wWwwwWwwWwwwWw...Sss',
+    'ssS...wWWWWWwwWWWWWw...Sss',
+    'ssS...wwwwwwwwwwwwww...Sss'], GT));
+  const WG = { w: '#7a5230', W: '#4a3420', c: '#c8b090', C: '#a89070', m: '#5a5f66' };
+  SPRITES.wagon = outline(mk([
+    '....cccccccccccccc....',
+    '..cccccccccccccccccc..',
+    '.cCcccccccccccccccCc..',
+    '.cCcccccccccccccccCc..',
+    '.ccccccccccccccccccc..',
+    'wwwwwwwwwwwwwwwwwwwww.',
+    'wWWWWWWWWWWWWWWWWWWWw.',
+    'wwwwwwwwwwwwwwwwwwwww.',
+    '..mm..........mm......',
+    '.mmmm........mmmm.....',
+    '..mm..........mm......'], WG));
+  // иконки HUD 5×5
+  SPRITES.iStone = mk(['.###.', '#####', '#####', '#####', '.###.'], { '#': '#c8bfae' });
+  SPRITES.iGold  = mk(['.###.', '#...#', '#...#', '#...#', '.###.'], { '#': '#e8c34c' });
+  SPRITES.iAle   = mk(['#####', '#...#', '#...#', '#####', '.###.'], { '#': '#c98a3a' });
+  SPRITES.iGem   = mk(['..#..', '.###.', '#####', '.###.', '..#..'], { '#': '#7fd8e8' });
+  SPRITES.iDwarf = mk(['.###.', '#####', '.###.', '#...#', '#...#'], { '#': '#9ec4e8' });
+  SPRITES.iOre   = mk(['..##.', '.####', '####.', '.###.', '..#..'], { '#': '#c07a3a' });
+  SPRITES.scroll = outline(mk(['ppppp', 'p...p', 'p.p.p', 'p...p', 'ppppp'], { p: '#d8cfae' }), '#3a3020');
+  SPRITES.iMush = mk(['.###.', '#####', '..s..', '..s..'], { '#': '#d05a5a', s: '#e8dcc8' });
+  SPRITES.iMood = mk(['.#.#.', '#####', '#####', '.###.', '..#..'], { '#': '#e05a7a' });
+  SPRITES.plus   = mk(['..##..', '..##..', '######', '######', '..##..', '..##..'], { '#': '#eaffea' });
+  // приглушённая копия для слота, на который не хватает камня
+  SPRITES.plusOff = mk(['..##..', '..##..', '######', '######', '..##..', '..##..'], { '#': '#565073' });
+}
+
+/* ═══════════════ Состояние ═══════════════ */
+let st = null;
+function newGame() {
+  return {
+    v: CFG.SAVE_V, t0: Date.now(), tSave: Date.now(),
+    yarus: 1, row: 0, blocks: [], types: [], prio: [],
+    stone: 0, gold: 0, gems: 0, mush: 0, ale: 0,
+    ore: [0, 0, 0, 0, 0, 0], ingot: [0, 0, 0, 0, 0, 0],
+    dwarves: [], rooms: {}, pick: 0, gear: 0, cart: 0,
+    lastImm: 0, smeltT: 0, caravanT: CFG.CARAVAN_EVERY,
+    contracts: [], rage: 0, interT: 0, tut: 0, muted: false, seed: 1,
+    camY: 0, camFree: false, deepest: 1,
+    lastDaily: '', streak: 0, miles: {},
+  };
+}
+const BLOCK = 16, SURFACE_H = 44;
+let L = null, chips = [], floats = [], shake = 0, frame = 0, press = null, scrollY = 0;
+let ui = null, build = null, popupQ = [], dirty = false, hint = null, hintT = 0;
+let dust = [], vigCv = null, pulseKey = null;
+let uiT = 9, flash = null;                       // анимация панели, вспышка кнопки
+const hudPrev = {}, hudFlash = {};                // подсветка чипа при росте
+
+/* ── ГСЧ на сейве, чтобы дварфы не «перерождались» ── */
+const rnd = () => { st.seed = (st.seed * 1664525 + 1013904223) % 4294967296; return st.seed / 4294967296; };
+
+/* roomList зовут десятки раз за кадр (правила дварфов, availableRooms, HUD),
+   а он каждый раз пересобирал массив из Object.keys. Кэш на кадр: комнаты
+   внутри кадра не появляются, а lvl виден через ссылку на тот же объект.
+   Ключ кэша — номер кадра плюс число комнат, чтобы стройка была видна сразу. */
+let _rlF = -1, _rlN = -1, _rl = [];
+const roomList = () => {
+  const keys = Object.keys(st.rooms);
+  if (_rlF === frame && _rlN === keys.length) return _rl;
+  _rlF = frame; _rlN = keys.length;
+  return _rl = keys.map(k => ({ key: k, y: +k.split(':')[0], slot: +k.split(':')[1], r: st.rooms[k] }));
+};
+const roomsOf = t => roomList().filter(o => o.r.t === t);
+const has = t => roomsOf(t).length > 0;
+const bedsTotal = () => roomsOf('bed').reduce((a, o) => a + 2 * o.r.lvl, 0);
+const storeCap = () => CFG.STORE0 * E(st.deepest) * (1 + CFG.STORE_STEP * roomsOf('store').reduce((a, o) => a + o.r.lvl, 0));
+const gearM = () => Math.pow(CFG.GEAR_STEP, st.gear);
+const offProd = () => Math.min(CFG.OFF_PROD_MAX, CFG.OFF_PROD * Math.pow(CFG.OFF_PROD_STEP, st.cart));
+const offWindow = () => CFG.OFF_WINDOW + CFG.OFF_WINDOW_STEP * st.cart;
+
+const worldTop = n => (n - 1) * CFG.ROWS * BLOCK;
+const yarusH = () => CFG.ROWS * BLOCK;
+const worldBottom = () => worldTop(st.yarus) + yarusH(st.yarus);
+const rowY = () => worldTop(st.yarus) + st.row * BLOCK;
+const colX = c => L.x0 + c * BLOCK + 1;      // спрайт 14 px в блоке 16
+const blockHp = (n, type) => blockHpBase(n) * BTYPE[type];
+
+function makeDwarf() {
+  const ru = T === I18N.ru;
+  const ti = Math.floor(rnd() * TRAITS.length);
+  return {
+    n1: Math.floor(rnd() * N1.length), n2: Math.floor(rnd() * N2.length), sr: Math.floor(rnd() * SUR.length),
+    ti, c: Math.floor(rnd() * HAIR_N), lvl: 1, xp: 0, mood: 70 + rnd() * 20, fat: rnd() * 20,
+    x: 0, y: 0, task: null, moving: false,
+  };
+}
+function addDwarf() {
+  const d = makeDwarf();
+  d.x = L.shaftX + 8; d.y = worldTop(Math.max(1, st.yarus - 1));
+  st.dwarves.push(d); dirty = true;
+  return d;
+}
+const hireCost = () => CFG.C_HIRE * E(st.deepest) * Math.pow(CFG.HIRE_STEP, st.dwarves.length);
+const dName = d => (T === I18N.ru ? N1[d.n1] + N2[d.n2] : N1E[d.n1] + N2E[d.n2]);
+const dSur = d => (T === I18N.ru ? SUR[d.sr] : SURE[d.sr]);
+const trait = d => TRAITS[d.ti];
+const moodM = d => CFG.MOOD_LO + (CFG.MOOD_HI - CFG.MOOD_LO) * (d.mood / 100);
+const power = d => levelM(d.lvl) * moodM(d) * (trait(d).speed || 1) * gearM();
+
+/* ═══════════════ Ряд забоя ═══════════════ */
+function newRow() {
+  st.blocks = []; st.types = []; st.prio = [];
+  for (let c = 0; c < CFG.BLOCK_W; c++) {
+    const t = blockType(st.yarus, st.row, c);
+    st.types.push(t); st.blocks.push(blockHp(st.yarus, t)); st.prio.push(false);
+  }
+  st.dwarves.forEach(d => { if (d.task && d.task.kind === 'dig') d.task = null; });
+}
+
+/* ═══════════════ Правила выбора дела ═══════════════ */
+// Сколько дварфов колония держит в забое. Половина города, как заложено в
+// симуляторе: без этого правила при девяти штреках в забое оставалось двое,
+// и глубина упиралась в один тап игрока.
+const wantDiggers = () => Math.max(CFG.MIN_DIGGERS, Math.min(CFG.BLOCK_W, Math.ceil(st.dwarves.length / 2)));
+// КРЕПЬ: глубина привязана к городу. Первые ярусы свободны (комнат ещё нет).
+const deepestRoomY = () => roomList().reduce((a, o) => Math.max(a, o.y), 0);
+const digLimit = () => Math.max(7, deepestRoomY() + CFG.SUPPORT_SPAN);
+const digLocked = () => st.yarus > digLimit();
+const busyIn = (kind, y, slot) => st.dwarves.filter(d => d.task && d.task.kind === kind && d.task.y === y && d.task.slot === slot).length;
+const freeBedCount = () => bedsTotal() - st.dwarves.filter(d => d.task && d.task.kind === 'sleep' && d.task.bed).length;
+/* Комнату дварф выбирает ПО НУЖДЕ, а не по порядку постройки. В первой версии
+   перебор шёл по ключам, поэтому тридцать штреков забирали всех, а ферма с
+   пивоварней стояли пустыми: эль нулевой, настроение у всех ноль, вся колония
+   работала на ×0,7 и никто об этом не знал. */
+function roomNeedingHands() {
+  let best = null, bv = -Infinity;
+  for (const o of roomList()) {
+    const def = roomDef(o.r.t);
+    if (!def.hands) continue;
+    if (busyIn('room', o.y, o.slot) >= def.hands) continue;
+    if (o.r.t === 'brew' && st.mush < 1) continue;
+    if (o.r.t === 'smelt' && !st.ore.some(v => v >= 1)) continue;
+    let score;
+    if (o.r.t === 'farm') score = st.mush < 40 ? 300 : 40;
+    else if (o.r.t === 'brew') score = st.ale < 25 ? 320 : 50;
+    else if (o.r.t === 'smelt') score = 140;
+    else score = 100 + o.y * 0.5;            // из штреков — глубокий доходнее
+    if (score > bv) { bv = score; best = o; }
+  }
+  return best;
+}
+function freeBlock() {
+  let best = -1, bv = -Infinity;
+  for (let c = 0; c < CFG.BLOCK_W; c++) {
+    if (st.blocks[c] <= 0) continue;
+    const crowd = st.dwarves.filter(d => d.task && d.task.kind === 'dig' && d.task.col === c).length;
+    const score = (st.prio[c] ? 1000 : 0) - crowd * 100 + st.blocks[c] / 1e6;
+    if (score > bv) { bv = score; best = c; }
+  }
+  return best;
+}
+function chooseTask(d) {
+  if (d.fat >= CFG.FAT_SLEEP && has('bed')) {
+    const r = roomsOf('bed').find(x => busyIn('sleep', x.y, x.slot) < 2 * x.r.lvl) || roomsOf('bed')[0];
+    // bunk — номер койки: спящие ложатся на нары ярусами, а не в одну кучу
+    return { kind: 'sleep', bed: freeBedCount() > 0, y: r.y, slot: r.slot, bunk: busyIn('sleep', r.y, r.slot) };
+  }
+  if (d.fat >= CFG.FAT_SLEEP) return { kind: 'sleep', bed: false, y: Math.max(1, st.yarus - 1), slot: 0 };
+  if (d.mood <= CFG.MOOD_DRINK && st.ale >= 1 && has('tavern')) {
+    const t = roomsOf('tavern')[0];
+    return { kind: 'drink', y: t.y, slot: t.slot, t: 0, ofs: busyIn('drink', t.y, t.slot) * 16 };
+  }
+  if (!digLocked()) {
+    const prio = st.prio.findIndex((p, c) => p && st.blocks[c] > 0);
+    if (prio >= 0) return { kind: 'dig', col: prio };
+    const diggers = st.dwarves.filter(x => x.task && x.task.kind === 'dig').length;
+    if (diggers >= wantDiggers()) {
+      const r = roomNeedingHands();
+      if (r) return { kind: 'room', y: r.y, slot: r.slot, rt: r.r.t, ofs: busyIn('room', r.y, r.slot) * 16 };
+    }
+    const c = freeBlock();
+    if (c >= 0) return { kind: 'dig', col: c };
+  } else {
+    // Крепь встала: забой превращается в завал, который разбирают на камень.
+    // Раньше этим занимались только бездельники — а при запертом забое все уходили
+    // в комнаты, камень не шёл, и колония стояла запертой 70% сессии.
+    const scavs = st.dwarves.filter(x => x.task && x.task.kind === 'scav').length;
+    if (scavs < wantDiggers()) return { kind: 'scav', col: scavs % CFG.BLOCK_W };
+    const r = roomNeedingHands();
+    if (r) return { kind: 'room', y: r.y, slot: r.slot, rt: r.r.t, ofs: busyIn('room', r.y, r.slot) * 16 };
+    return { kind: 'scav', col: Math.floor(rnd() * CFG.BLOCK_W) };
+  }
+  return { kind: 'idle' };
+}
+/* Координата y дварфа — ЛИНИЯ НОГ (низ спрайта): спрайты v2 разной высоты,
+   и якорь по верху разъезжался бы на каждом кадре анимации. */
+function taskSpot(t) {
+  if (t.kind === 'dig' || t.kind === 'scav') return { x: colX(t.col), y: rowY() + 2 };
+  if (t.kind === 'idle') return { x: L.shaftX + 8, y: rowY() + 2 };
+  const floorY = worldTop(t.y) + yarusH() - 3;
+  if (t.kind === 'sleep' && t.bed) {
+    // ярус нар = число НАРИСОВАННЫХ коек, иначе второй спящий висит в воздухе;
+    // переполнение сдвигается вбок — двое на одной койке валетом
+    const room = st.rooms[t.y + ':' + t.slot];
+    const shown = Math.min(3, room ? room.lvl : 1);
+    const b = t.bunk || 0, hx0 = t.slot === 0 ? L.x0 : L.shaftX + L.shaft;
+    return { x: hx0 + 4 + Math.floor(b / shown) * 5, y: floorY - (b % shown) * 7 - 3 };
+  }
+  const ofs = t.ofs || 0;
+  const hx = t.slot === 0 ? L.x0 + 5 + ofs : L.shaftX + L.shaft + L.hall - 21 - ofs;
+  return { x: hx, y: floorY };
+}
+
+/* ═══════════════ Раскладка ═══════════════ */
+const HUD_H = 30, BAR_H = 26, MAP_W = 7;
+function resize() {
+  const dpr = Math.min(window.devicePixelRatio || 1, 3);
+  // Нижние границы обязательны: в iframe портала и в панели предпросмотра первый
+  // resize случается при нулевом размере окна, буфер выходит 0×0 и drawImage падает.
+  const devW = Math.max(120, Math.round(window.innerWidth * dpr));
+  const devH = Math.max(200, Math.round(window.innerHeight * dpr));
+  const land = window.innerWidth > window.innerHeight * 1.15;
+  const wantW = land ? 300 : 124, wantH = land ? 176 : 256;
+  S = Math.max(1, Math.min(Math.floor(devW / wantW), Math.floor(devH / wantH)));
+  LW = Math.max(100, Math.floor(devW / S)); LH = Math.max(180, Math.floor(devH / S));
+  buf.width = LW; buf.height = LH;
+  screenCv.width = LW * S; screenCv.height = LH * S;
+  screenCv.style.width = (LW * S / dpr) + 'px';
+  screenCv.style.height = (LH * S / dpr) + 'px';
+  sctx.imageSmoothingEnabled = false; ctx.imageSmoothingEnabled = false;
+  const colW = CFG.BLOCK_W * BLOCK, shaft = 24, hall = (colW - shaft) / 2;
+  const x0 = Math.floor((LW - MAP_W - colW) / 2);
+  // при повороте экрана колонка переезжает — дварфов переносим вместе с ней,
+  // иначе они остаются висеть в пустой породе на старых координатах
+  const dx = L ? x0 - L.x0 : 0;
+  L = { land, colW, shaft, hall, x0, shaftX: x0 + hall,
+        view: { y: HUD_H, h: LH - HUD_H - BAR_H },
+        map: { x: LW - MAP_W + 1, y: HUD_H + 2, w: MAP_W - 3, h: LH - HUD_H - BAR_H - 4 } };
+  if (dx && st && st.dwarves) st.dwarves.forEach(d => { d.x += dx; });
+  buildVignette();
+}
+window.addEventListener('resize', resize);
+const camTarget = () => Math.max(-SURFACE_H, worldBottom() - L.view.h + 10);
+const camMin = () => -SURFACE_H, camMax = () => Math.max(camMin(), worldBottom() - 24);
+
+/* ═══════════════ Ввод ═══════════════ */
+let hits = [], drag = null;
+const hitR = (r, p) => p.x >= r.x && p.y >= r.y && p.x < r.x + r.w && p.y < r.y + r.h;
+function toBuf(e) { const b = screenCv.getBoundingClientRect();
+  return { x: (e.clientX - b.left) / b.width * LW, y: (e.clientY - b.top) / b.height * LH }; }
+screenCv.addEventListener('pointerdown', e => {
+  e.preventDefault(); Sound.unlock();
+  const p = toBuf(e);
+  drag = { y: p.y, cam: st.camY, scroll: scrollY, moved: 0 };
+  for (let i = hits.length - 1; i >= 0; i--) if (hitR(hits[i].r, p)) {
+    flash = { r: hits[i].r, t: .12 };            // тактильный отклик: рамка на кадр-два
+    hits[i].fn(p); return;
+  }
+});
+screenCv.addEventListener('pointermove', e => {
+  if (!drag) return;
+  const d = drag.y - toBuf(e).y;
+  if (Math.abs(d) > 3) {
+    drag.moved = 1; press = null;
+    if (ui) scrollY = Math.max(0, drag.scroll + d);
+    else { st.camFree = true; st.camY = Math.max(camMin(), Math.min(camMax(), Math.round(drag.cam + d))); }
+  }
+});
+const endDrag = () => { drag = null; press = null; };
+screenCv.addEventListener('pointerup', endDrag);
+screenCv.addEventListener('pointercancel', endDrag);
+screenCv.addEventListener('contextmenu', e => e.preventDefault());
+
+function openUI(o) { ui = o; scrollY = 0; uiT = 0; YSDK.gameplayStop(); Sound.open(); }
+function closeUI() { ui = null; if (!document.hidden) YSDK.gameplayStart(); Sound.close(); if (popupQ.length) openUI(popupQ.shift()); }
+function showPopup(o) { o.kind = 'popup'; if (ui) popupQ.push(o); else openUI(o); }
+function say(s, t = 2.5) { hint = s; hintT = t; }
+
+/* ═══════════════ Копание ═══════════════ */
+function addChips(sx, sy, n, col) {
+  col = col || shade(stratum(st.yarus).rock, 1.35);   // щепки цвета своей породы
+  for (let i = 0; i < n; i++) chips.push({ x: sx, y: sy, vx: (Math.random() - .5) * 60, vy: -25 - Math.random() * 40, t: 0, col });
+}
+function capped(v) { return Math.min(v, storeCap()); }
+function damage(col, amount, sx, sy) {
+  if (st.blocks[col] === undefined || st.blocks[col] <= 0) return;
+  st.blocks[col] -= amount;
+  if (st.blocks[col] > 0) return;
+  st.blocks[col] = 0; st.prio[col] = false;
+  const type = st.types[col], si = stratumIdx(st.yarus), s = STRATA[si];
+  if (type === 'vein' && s.ore > 0) {
+    const got = CFG.ORE_RATE * 260;
+    st.ore[s.ore] = capped(st.ore[s.ore] + got);
+    floats.push({ s: '+' + fmt(got), ic: 'iOre', x: sx, y: sy, t: 0, col: s.oreCol });
+    Sound.coins(2);
+  } else if (type === 'crystal') {
+    const g = 2 + Math.floor(rnd() * 2);
+    st.gems += g;
+    floats.push({ s: '+' + g, ic: 'iGem', x: sx, y: sy, t: 0, col: '#7fd8e8' });
+    Sound.gem();
+  } else if (type === 'cave' && rnd() < CFG.CAVE_DWARF && st.dwarves.length < CFG.POP_CAP) {
+    // заблудившийся в пустоте — третий путь пополнить колонию, помимо коек и найма
+    addDwarf();
+    floats.push({ s: '+1', ic: 'iDwarf', x: sx, y: sy, t: 0, col: '#9ec4e8' });
+    say(T.found); Sound.found();
+  } else Sound.crack();
+  addChips(sx, sy, 8);
+  shake = Math.max(shake, 3);
+  st.dwarves.forEach(d => { if (d.task && d.task.kind === 'dig' && d.task.col === col) d.task = null; });
+  if (st.blocks.every(v => v <= 0)) rowDone();
+  dirty = true;
+}
+function rowDone() {
+  for (let c = 0; c < CFG.BLOCK_W; c++) addChips(colX(c) + 7, rowY() + 8, 3);   // залп по всему ряду
+  st.row++;
+  if (st.row >= CFG.ROWS) {
+    const got = stoneOf(st.yarus);
+    st.stone = capped(st.stone + got);
+    floats.push({ s: '+' + fmt(got), ic: 'iStone', x: L.shaftX + L.shaft / 2, y: worldTop(st.yarus) + 8, t: 0, col: '#e8dcc8' });
+    const before = stratumIdx(st.yarus);
+    st.yarus++; st.row = 0;
+    st.deepest = Math.max(st.deepest, st.yarus);
+    if (stratumIdx(st.yarus) !== before) {
+      shake = 10; Sound.stratum();
+      say(T.newStratum + ': ' + T.strata[stratumIdx(st.yarus)]);
+      tryInterstitial();
+    } else { shake = 6; Sound.breakthrough(); }
+  }
+  newRow();
+}
+function tapDamage(col, sx, sy) {
+  if (digLocked()) {
+    // Завал разбирается тапом на камень — тем самым камнем, которого не хватает
+    // на крепь. Стена, о которую нечего делать, была бы худшим вариантом.
+    const got = CFG.SCAV * 6 * E(st.yarus);
+    st.stone = capped(st.stone + got);
+    floats.push({ s: '+' + fmt(got), ic: 'iStone', x: sx, y: sy, t: 0, col: '#d8cfc0' });
+    addChips(sx, sy, 3); Sound.scav(); dirty = true;
+    return;
+  }
+  const mult = st.rage > 0 ? CFG.RAGE_MULT : 1;
+  damage(col, pickDmg(st.pick) * gearM() * mult, sx, sy);
+  Sound.hit();
+  if (st.tut === 0) nextTut();
+}
+
+/* ═══════════════ Постройка и апгрейды ═══════════════ */
+function availableRooms(y) {
+  return ROOMDEF.filter(d => st.deepest >= d.at && (d.t !== 'mine' || stratum(y).ore > 0)
+    && (d.t !== 'tavern' || !has('tavern')) && (d.t !== 'forge' || !has('forge')));
+}
+function doBuild(t, y, slot) {
+  const cost = roomCost(t, y);
+  if (st.stone < cost) { Sound.error(); return false; }
+  st.stone -= cost;
+  st.rooms[y + ':' + slot] = { t, lvl: 1 };
+  Sound.build(); dirty = true;
+  st.dwarves.forEach(d => { if (d.task && (d.task.kind === 'dig' || d.task.kind === 'idle')) d.task = null; });
+  if (st.tut === 2) nextTut();
+  return true;
+}
+function doUpgradeRoom(o) {
+  if (o.r.lvl >= CFG.ROOM_LVL_MAX) return;
+  const cost = roomLvlCost(o.y, o.r.lvl);
+  if (st.stone < cost) { Sound.error(); return; }
+  st.stone -= cost; o.r.lvl++; Sound.upgrade(); dirty = true;
+}
+const pickCost = () => CFG.C_PICK * E(CFG.PICK_YARUS[Math.min(st.pick + 1, CFG.PICK_YARUS.length - 1)]);
+const canPick = () => st.pick < pickTier(st.deepest);
+const gearCost = () => CFG.C_GEAR * E(st.deepest) * Math.pow(CFG.GEAR_COST_STEP, st.gear);
+const cartCost = () => CFG.C_CART * E(st.deepest) * Math.pow(CFG.CART_COST_STEP, st.cart);
+
+/* ═══════════════ Караван и контракты ═══════════════ */
+const ORE_NAMES = () => T.ores;
+function stockValue() {
+  let v = 0;
+  for (let i = 1; i <= 5; i++) { v += st.ore[i] * orePrice(i); v += st.ingot[i] * orePrice(i) * CFG.INGOT_MULT; }
+  return v;
+}
+// пока фургон у ворот — цена выше; после сделки караван уезжает
+const caravanMult = () => (st.caravanT <= 0 ? CFG.CARAVAN_BONUS : 1);
+function sellAll(mult) {
+  const v = stockValue();
+  if (v <= 0) { Sound.error(); return; }
+  st.gold += v * mult * caravanMult();
+  for (let i = 1; i <= 5; i++) { st.ore[i] = 0; st.ingot[i] = 0; }
+  Sound.coins(4); dirty = true;
+  st.caravanT = CFG.CARAVAN_EVERY;
+  if (st.tut === 4) nextTut();
+  tryInterstitial();
+}
+function makeContract() {
+  const items = [];
+  const avail = [];
+  for (let i = 1; i <= 5; i++) if (stratumIdx(st.deepest) >= i) avail.push({ kind: 'ore', i });
+  if (has('smelt')) for (let i = 1; i <= 5; i++) if (stratumIdx(st.deepest) >= i) avail.push({ kind: 'ingot', i });
+  if (has('brew')) avail.push({ kind: 'ale' });
+  if (!avail.length) avail.push({ kind: 'ore', i: 1 });
+  const n = 1 + Math.floor(rnd() * 2);
+  const picked = {};                    // дубли сливаем: «Эль 9, Эль 9» → «Эль 18»
+  for (let k = 0; k < n; k++) {
+    const a = avail[Math.floor(rnd() * avail.length)];
+    const base = a.kind === 'ale' ? 6 : a.kind === 'ingot' ? 4 : 12;
+    const q = Math.max(1, Math.round(base * (0.6 + rnd())));
+    const kk = a.kind + (a.i || '');
+    if (picked[kk]) picked[kk].q += q;
+    else { picked[kk] = Object.assign({ q }, a); items.push(picked[kk]); }
+  }
+  let val = 0;
+  items.forEach(it => {
+    val += it.kind === 'ale' ? it.q * goldRate(st.deepest) * 8
+      : it.kind === 'ingot' ? it.q * orePrice(it.i) * CFG.INGOT_MULT : it.q * orePrice(it.i);
+  });
+  return { items, gold: val * 1.6, gems: 1 + Math.floor(rnd() * 2) };
+}
+function refillContracts() { while (st.contracts.length < 3) st.contracts.push(makeContract()); }
+function canDeliver(c) {
+  return c.items.every(it => it.kind === 'ale' ? st.ale >= it.q : it.kind === 'ingot' ? st.ingot[it.i] >= it.q : st.ore[it.i] >= it.q);
+}
+function deliver(idx) {
+  const c = st.contracts[idx];
+  if (!canDeliver(c)) { Sound.error(); return; }
+  c.items.forEach(it => { if (it.kind === 'ale') st.ale -= it.q; else if (it.kind === 'ingot') st.ingot[it.i] -= it.q; else st.ore[it.i] -= it.q; });
+  st.gold += c.gold; st.gems += c.gems;
+  st.contracts.splice(idx, 1); refillContracts();
+  Sound.deliver(); dirty = true;
+}
+
+/* ═══════════════ Реклама ═══════════════ */
+function tryInterstitial() {
+  if (st.interT > 0) return;
+  st.interT = CFG.INTER_CD;
+  YSDK.showInterstitial();
+}
+// После rewarded взводим кулдаун интерстишла: «Продать ×2» внутри зовёт
+// sellAll → tryInterstitial, и без гарда зритель получал рекламу сразу
+// после рекламы. Кулдаун ставим ДО награды — sellAll выполняется в onReward.
+function rewarded(onOk) {
+  st.interT = Math.max(st.interT, CFG.INTER_CD);
+  YSDK.showRewarded(() => { onOk(); dirty = true; });
+}
+
+/* ═══════════════ Туториал ═══════════════ */
+const TUT_MAX = 5;
+function nextTut() {
+  if (st.tut >= TUT_MAX) return;
+  st.tut++; dirty = true;
+  // единственная скрытая механика — приказ долгим тапом; строка hint в v1
+  // лежала в локализации и ни разу не показывалась
+  if (st.tut === TUT_MAX) say(T.hint, 6);
+}
+/* Самый верхний свободный слот. Нужен и туториалу, и стрелке-указателю: шаг
+   «построй» раньше зажигался по первому же пробою, а первый слот появляется
+   только после третьего яруса — игра требовала строить там, где негде. */
+function firstFreeSlot(needAfford) {
+  for (let y = 1; y < st.yarus; y++) {
+    const av = availableRooms(y);
+    if (!av.length) continue;
+    if (needAfford && !av.some(d => st.stone >= roomCost(d.t, y))) continue;
+    for (let s = 0; s < 2; s++) if (!st.rooms[y + ':' + s]) return { y, slot: s };
+  }
+  return null;
+}
+
+/* ═══════════════ Вехи ═══════════════ */
+function checkMiles() {
+  const m = st.miles, pop = st.dwarves.length, depth = st.deepest * 4;
+  const ok = { m100: depth >= 100, m200: depth >= 200, m400: depth >= 400, m800: depth >= 800,
+               p6: pop >= 6, p12: pop >= 12, p24: pop >= 24, tav: has('tavern'), smelt: has('smelt') };
+  const label = k => k[0] === 'm' ? k.slice(1) + ' ' + T.depth : k[0] === 'p' ? T.colony + ' ' + k.slice(1)
+                   : k === 'tav' ? T.rooms.tavern : T.rooms.smelt;
+  for (const [k, gem] of CFG.MILES) {
+    if (m[k] || !ok[k]) continue;
+    m[k] = 1; st.gems += gem; dirty = true;
+    say(T.mile + ' — ' + label(k) + ': +' + gem, 4); Sound.mile();
+    return;                                       // по одной за раз — тосты не давятся
+  }
+}
+
+/* ═══════════════ Оффлайн ═══════════════ */
+function offlineCatchUp(sec) {
+  sec = Math.min(sec, Math.min(offWindow(), CFG.OFF_CAP));
+  if (sec < 60) return null;
+  const before = { yarus: st.yarus, gold: st.gold, ore: st.ore.slice(), ale: st.ale, stone: st.stone };
+  const k = offProd(), avgP = levelM(expLevel(st.deepest)) * 1.0 * gearM();
+  // комнаты
+  roomList().forEach(o => {
+    const hands = roomDef(o.r.t).hands;
+    if (!hands) return;
+    const rate = roomOut(o.r.lvl) * avgP * k * hands / 2;
+    if (o.r.t === 'mine') { const oi = stratum(o.y).ore; if (oi > 0) st.ore[oi] = capped(st.ore[oi] + CFG.ORE_RATE * 2 * rate * sec); }
+    else if (o.r.t === 'farm') st.mush = capped(st.mush + CFG.MUSH_RATE * 2 * rate * sec);
+    else if (o.r.t === 'brew') { const made = Math.min(CFG.ALE_RATE * 2 * rate * sec, st.mush / CFG.ALE_IN);
+      st.ale = capped(st.ale + made); st.mush = Math.max(0, st.mush - made * CFG.ALE_IN); }
+    else if (o.r.t === 'smelt') { for (let i = 5; i >= 1; i--) {
+      const can = Math.min(st.ore[i], sec / CFG.SMELT_TIME * rate);
+      if (can > 0) { st.ore[i] -= can; st.ingot[i] = capped(st.ingot[i] + can); break; } } }
+  });
+  // забой на ночной смене
+  const diggers = Math.min(CFG.BLOCK_W, Math.max(0, st.dwarves.length - roomList().filter(o => roomDef(o.r.t).hands).length * 2));
+  let dmg = diggers * CFG.DIGGER * pickDmg(st.pick) * gearM() * avgP * CFG.OFF_DIG * sec;
+  let guard = 0;
+  while (dmg > 0 && guard++ < 4000) {
+    if (digLocked()) break;              // крепь держит и оффлайн
+    const c = st.blocks.findIndex(v => v > 0);
+    if (c < 0) { rowDone(); continue; }
+    const take = Math.min(dmg, st.blocks[c]);
+    st.blocks[c] -= take; dmg -= take;
+    if (st.blocks[c] <= 0) { st.blocks[c] = 0; if (st.blocks.every(v => v <= 0)) rowDone(); }
+  }
+  st.dwarves.forEach(d => { d.fat = Math.max(0, d.fat - 30); d.mood = Math.max(10, d.mood - sec / CFG.MOOD_SPAN * 40); });
+  const dOre = st.ore.map((v, i) => v - before.ore[i]);
+  return { yarus: st.yarus - before.yarus, gold: st.gold - before.gold, stone: st.stone - before.stone,
+           ale: st.ale - before.ale, ore: dOre, sec };
+}
+
+/* ═══════════════ Сейв ═══════════════ */
+function save() { dirty = true; }
+async function flushSave() {
+  if (!dirty) return; dirty = false;
+  st.tSave = Date.now();
+  const o = Object.assign({}, st);
+  delete o.camY; delete o.camFree;
+  await YSDK.saveData(o);
+}
+setInterval(flushSave, 5000);
+document.addEventListener('visibilitychange', () => {
+  Sound.setMuted(document.hidden || st.muted);
+  if (document.hidden) { flushSave(); YSDK.gameplayStop(); } else if (!ui) YSDK.gameplayStart();
+});
+
+async function loadGame() {
+  const d = await YSDK.loadData();
+  st = newGame();
+  if (d && d.v === CFG.SAVE_V && d.yarus) {
+    Object.assign(st, d);
+    st.miles = st.miles || {};             // сейвы до вех
+    st.camFree = false;
+    if (!st.blocks || !st.blocks.length) newRow();
+  } else newRow();
+  refillContracts();
+  // Гард модерации: никакой рекламы на старте сессии. Без него оффлайн-догон
+  // мог пробить пласт, а rowDone на смене пласта зовёт tryInterstitial —
+  // интерстишл вылетал ДО gameReady, прямо на загрузке.
+  st.interT = Math.max(st.interT || 0, CFG.INTER_CD);
+  if (!st.dwarves.length) {
+    for (let i = 0; i < 2; i++) { const dw = makeDwarf(); dw.x = L.shaftX + 8 + i * 16; dw.y = rowY() + 2; st.dwarves.push(dw); }
+  }
+  const away = (Date.now() - (d && d.tSave ? d.tSave : Date.now())) / 1000;
+  if (away > 60) {
+    const sum = offlineCatchUp(away);
+    if (sum) showPopup({ title: T.offline, sum });
+  }
+  // ежедневный дар: серия растёт, пока не пропущено больше двух суток;
+  // во время туториала не показываем — там и так всё мигает
+  if (st.tut >= TUT_MAX) {
+    const dn = new Date();
+    const today = dn.getFullYear() + '-' + (dn.getMonth() + 1) + '-' + dn.getDate();
+    if (st.lastDaily !== today) {
+      const fresh = !st.lastDaily || away > 48 * 3600;
+      st.streak = fresh ? 0 : (st.streak || 0) + 1;
+      const rw = CFG.DAILY[st.streak % CFG.DAILY.length];
+      const g = rw.g ? Math.round(rw.g * E(st.deepest)) : 0;
+      if (g) st.gold += g;
+      if (rw.gem) st.gems += rw.gem;
+      st.lastDaily = today; dirty = true; Sound.daily();
+      showPopup({ title: T.daily, daily: { g, gem: rw.gem || 0, day: (st.streak % CFG.DAILY.length) + 1 } });
+    }
+  }
+}
+
+/* ═══════════════ Цикл ═══════════════ */
+let last = performance.now();
+function loop(now) {
+  const dt = Math.min(.1, (now - last) / 1000); last = now;
+  frame++;
+  update(dt); draw();
+  requestAnimationFrame(loop);
+}
+function update(dt) {
+  if (st.interT > 0) st.interT -= dt;
+  if (st.rage > 0) st.rage -= dt;
+  if (st.caravanT > 0) {
+    st.caravanT -= dt;
+    // прибытие — событие: колокол и строка, ждать теперь есть чего (+25% к цене)
+    if (st.caravanT <= 0 && st.deepest >= 4) { Sound.caravan(); say(T.caravanHere); }
+  }
+  if (hintT > 0) { hintT -= dt; if (hintT <= 0) hint = null; }
+  uiT += dt;
+  if (flash) { flash.t -= dt; if (flash.t <= 0) flash = null; }
+  // чип HUD вспыхивает, когда ресурс вырос: иначе прирост в 3 единицы на
+  // фоне 67К невидим, и добыча кажется мёртвой
+  for (const k of ['stone', 'gold', 'gems', 'ale']) {
+    if (hudPrev[k] !== undefined && st[k] > hudPrev[k] + .5) hudFlash[k] = .45;
+    hudPrev[k] = st[k];
+    if (hudFlash[k] > 0) hudFlash[k] -= dt;
+  }
+  if (frame % 60 === 30) checkMiles();
+  // накал музыки следует за жизнью колонии: копают — громче, раж — ещё выше
+  if (frame % 120 === 0) {
+    const dg = st.dwarves.filter(x => x.task && (x.task.kind === 'dig' || x.task.kind === 'scav')).length;
+    Sound.intensity(Math.min(1, .3 + .5 * dg / Math.max(1, wantDiggers()) + (st.rage > 0 ? .25 : 0)));
+  }
+  // пыль в столбах света и капли с водяных блоков забоя
+  if (frame % 6 === 0 && dust.length < 36) {
+    const rl = roomList();
+    if (rl.length) {
+      const o = rl[Math.floor(Math.random() * rl.length)];
+      const hx = o.slot === 0 ? L.x0 : L.shaftX + L.shaft;
+      const tx = o.slot === 0 ? hx + L.hall - 5 : hx + 3;
+      dust.push({ x: tx + 1 + Math.floor(Math.random() * 7) - 3, y: worldTop(o.y) + 6 + Math.random() * 4,
+                  vy: 2.5 + Math.random() * 2.5, life: 2 + Math.random() * 2, t: 0, col: '#bfae87' });
+    }
+    st.types.forEach((tp, c) => {
+      if (tp === 'water' && st.blocks[c] > 0 && Math.random() < .12)
+        dust.push({ x: colX(c) + 3 + Math.floor(Math.random() * 9), y: rowY() + 15, vy: 26, life: .7, t: 0, col: '#4f96d8' });
+    });
+  }
+  dust = dust.filter(p => { p.t += dt; p.y += p.vy * dt; return p.t < p.life; });
+  if (press && performance.now() - press.t0 > 380) {
+    st.prio[press.col] = !st.prio[press.col];
+    say(st.prio[press.col] ? T.order : T.mark); Sound.mark(st.prio[press.col]);
+    st.dwarves.forEach(d => { if (d.task && d.task.kind === 'dig' && !trait(d).stubborn) d.task = null; });
+    press = null;
+  }
+
+  // шаг «построй» зажигаем, только когда слот есть И на него хватает камня:
+  // иначе стрелка показывает на серую плашку, которую нажать нельзя
+  if (st.tut === 1 && firstFreeSlot(true)) nextTut();
+
+  // иммиграция
+  st.lastImm += dt;
+  if (st.lastImm >= CFG.IMMIGRATE && st.dwarves.length < Math.max(2, bedsTotal()) && st.dwarves.length < CFG.POP_CAP) {
+    st.lastImm = 0;
+    const dw = addDwarf();
+    dw.y = -SURFACE_H + 30;             // иммигрант спускается от ворот
+    if (st.tut === 3) nextTut();
+  }
+
+  const aura = st.dwarves.reduce((a, d) => a + (trait(d).aura || 0), 0) / Math.max(1, st.dwarves.length);
+  const P = pickDmg(st.pick) * gearM();
+
+  for (const d of st.dwarves) {
+    if (d.task && d.task.kind !== 'sleep' && d.fat >= CFG.FAT_SLEEP) d.task = null;
+    if (d.task && d.task.kind !== 'sleep' && d.task.kind !== 'drink'
+        && d.mood <= CFG.MOOD_DRINK && st.ale >= 1 && has('tavern')) d.task = null;
+    if (!d.task) d.task = chooseTask(d);
+
+    const t = d.task, spot = taskSpot(t), step = CFG.WALK * dt, vstep = step * CFG.SHAFT_SPEED;
+    const atY = Math.abs(d.y - spot.y) <= vstep;
+    const tx = atY ? spot.x : L.shaftX + L.shaft / 2 - 7;   // центр ствола для 14-px спрайта
+    if (Math.abs(d.x - tx) > step) { d.dir = Math.sign(tx - d.x); d.x += d.dir * step; d.moving = true; }
+    else { d.x = tx; if (!atY) { d.y += Math.sign(spot.y - d.y) * vstep; d.moving = true; } else { d.y = spot.y; d.moving = false; } }
+    if (d.moving) { d.fat = Math.min(100, d.fat + 100 / CFG.WORK_SPAN * dt * .3 * (trait(d).fat || 1)); continue; }
+    // встал на место — разворачиваем к своей половине забоя: иначе весь ряд
+    // смотрит туда, откуда пришёл, то есть в одну сторону
+    if (t.kind === 'dig' || t.kind === 'scav') d.dir = colX(t.col) < L.shaftX ? -1 : 1;
+
+    if (t.kind === 'sleep') {
+      d.fat -= 100 / (t.bed ? CFG.SLEEP_BED : CFG.SLEEP_FLOOR) * dt;
+      if (d.fat <= 0) { d.fat = 0; d.task = null; }
+    } else if (t.kind === 'drink') {
+      // настроение растёт, только пока эль реально льётся
+      if (st.ale <= 0) { d.task = null; continue; }
+      st.ale = Math.max(0, st.ale - CFG.ALE_DRINK * dt);
+      d.mood = Math.min(100, d.mood + 100 / CFG.DRINK_SPAN * dt * (trait(d).drink || 1));
+      if (d.mood >= 95) d.task = null;
+    } else if (t.kind === 'scav') {
+      if (!digLocked()) { d.task = null; continue; }
+      st.stone = capped(st.stone + CFG.SCAV * E(st.yarus) * power(d) / gearM() * dt);
+      if (frame % 40 === 0) addChips(colX(t.col) + 4, rowY() + 8, 1);
+      wear(d, dt, aura);
+    } else if (t.kind === 'dig') {
+      if (digLocked() || st.blocks[t.col] === undefined || st.blocks[t.col] <= 0) { d.task = null; continue; }
+      // раж v2 бьёт и по дварфам — иначе rewarded ничего не значил в идле
+      damage(t.col, CFG.DIGGER * P * power(d) / gearM() * dt * (st.rage > 0 ? CFG.RAGE_MULT : 1),
+             colX(t.col) + 7, rowY() + 8);
+      wear(d, dt, aura);
+    } else if (t.kind === 'room') {
+      const room = st.rooms[t.y + ':' + t.slot];
+      if (!room) { d.task = null; continue; }
+      const out = roomOut(room.lvl) * power(d) * dt;
+      if (t.rt === 'mine') { const oi = stratum(t.y).ore;
+        if (oi > 0) st.ore[oi] = capped(st.ore[oi] + CFG.ORE_RATE * out * (trait(d).ore || 1)); }
+      else if (t.rt === 'farm') st.mush = capped(st.mush + CFG.MUSH_RATE * out);
+      else if (t.rt === 'brew') { const made = Math.min(CFG.ALE_RATE * out, st.mush / CFG.ALE_IN);
+        if (made > 0) { st.ale = capped(st.ale + made); st.mush -= made * CFG.ALE_IN; } else d.task = null; }
+      else if (t.rt === 'smelt') { st.smeltT += out;
+        if (st.smeltT >= CFG.SMELT_TIME) { st.smeltT = 0;
+          for (let i = 5; i >= 1; i--) if (st.ore[i] >= 1) { st.ore[i] -= 1; st.ingot[i] = capped(st.ingot[i] + 1); break; } } }
+      wear(d, dt, aura);
+    } else {
+      wear(d, dt * .3, aura); if (frame % 90 === 0) d.task = null;
+      if ((frame + d.n1 * 7) % 60 === 0 && Math.random() < .5) d.dir = -(d.dir || 1);   // оглядывается
+    }
+  }
+
+  if (!st.camFree) st.camY += (camTarget() - st.camY) * Math.min(1, dt * 6);
+  if (shake > 0) shake = Math.max(0, shake - dt * 26);
+  chips = chips.filter(c => { c.t += dt; c.x += c.vx * dt; c.y += c.vy * dt; c.vy += 150 * dt; return c.t < .9; });
+  floats = floats.filter(f => { f.t += dt; return f.t < 1.4; });
+}
+function wear(d, dt, aura) {
+  d.fat = Math.min(100, d.fat + 100 / CFG.WORK_SPAN * dt * (trait(d).fat || 1));
+  d.mood = Math.max(0, Math.min(100, d.mood - 100 / CFG.MOOD_SPAN * dt * (trait(d).moodRate || 1) + aura * dt * .02));
+  d.xp += dt;
+  if (d.xp > 120 * d.lvl && d.lvl < CFG.LEVEL_MAX) {
+    d.xp = 0; d.lvl++; dirty = true;
+    // раньше уровень рос молча — единственная «прокачка» дварфа не читалась
+    floats.push({ s: '↑' + d.lvl, x: d.x + 7, y: d.y - 26, t: 0, col: '#c9a227' });
+    Sound.lvlup(d.lvl);
+  }
+}
+
+/* ═══════════════ Рендер мира ═══════════════ */
+function draw() {
+  hits = [];
+  const cam = Math.round(st.camY) + (shake > 0 ? Math.round((Math.random() - .5) * shake) : 0);
+  const F2 = (frame >> 4) & 1, F4 = (frame >> 3) & 1;
+  // мигает только один слот — цель туториала или самый верхний доступный;
+  // когда мигали все доступные, поздняя игра превращалась в гирлянду.
+  // Пересчёт раз в 8 кадров: firstFreeSlot перебирает все ярусы, а мигание
+  // всё равно идёт с шагом 16 кадров — в каждом кадре считать нечего.
+  if ((frame & 7) === 0) {
+    const ffs = firstFreeSlot(true);
+    pulseKey = ffs ? ffs.y + ':' + ffs.slot : null;
+  }
+  R(0, 0, LW, LH, '#0d0a12');
+  ctx.save(); ctx.beginPath(); ctx.rect(0, L.view.y, LW, L.view.h); ctx.clip();
+  drawSurface(cam);
+  drawBackdrop(cam);
+  for (let n = 1; n <= st.yarus; n++) {
+    const top = worldTop(n), h = yarusH(n);
+    if (top + h - cam < -20 || top - cam > L.view.h) continue;
+    const sy = L.view.y + top - cam;
+    if (n < st.yarus) drawHall(n, sy, h, F2, cam);
+    else drawFace(n, sy);
+  }
+  st.dwarves.forEach(d => drawDwarf(d, cam, F4));
+  chips.forEach(c => R(c.x, L.view.y + c.y - cam, 2, 2, c.col || '#efe4d0'));
+  // пыль оседает в столбах света; мерцание — четверть кадров гаснет
+  dust.forEach(p => { if (((frame + (p.x | 0)) & 3) !== 0) R(p.x, L.view.y + p.y - cam, 1, 1, p.col); });
+  floats.forEach(f => {
+    if (f.t > 1.1 && (frame >> 2) % 2 === 0) return;
+    const y = L.view.y + f.y - cam - f.t * 12;
+    const w = textW(f.s) + (f.ic ? 7 : 0);
+    if (f.ic) spr(f.ic, f.x - w / 2, y + 1);
+    text(f.s, f.x - w / 2 + (f.ic ? 7 : 0), y, f.col);
+  });
+  ctx.restore();
+  if (vigCv) ctx.drawImage(vigCv, 0, 0);     // холодная виньетка поверх мира
+  // Цель туториала может оказаться выше экрана: показываем стрелку у кромки,
+  // тап по ней увозит камеру к свободному слоту.
+  if (st.tut === 2) {
+    const tgt = firstFreeSlot(true) || firstFreeSlot();
+    if (tgt) {
+      const ty = L.view.y + worldTop(tgt.y) - cam;
+      if (ty < L.view.y + 6 || ty > L.view.y + L.view.h - 6) {
+        const up = ty < L.view.y + 6, ay = up ? L.view.y + 3 : L.view.y + L.view.h - 12;
+        const w = 24, ax = Math.floor((LW - MAP_W - w) / 2);
+        slab(ax, ay, w, 10, '#5a4a2a');
+        textC(up ? '↑' : '↓', ax + w / 2, ay + 2 + ((frame >> 3) % 2), '#ffd24a', null);
+        hits.push({ r: { x: ax, y: ay, w, h: 10 }, fn: () => {
+          st.camFree = true;
+          st.camY = Math.max(camMin(), Math.min(camMax(), Math.round(worldTop(tgt.y) - L.view.h / 2)));
+        } });
+      }
+    }
+  }
+  drawMinimap(); drawHUD(); drawBar();
+  drawStrip();
+  if (build) drawBuildPanel();
+  if (ui) drawUI();
+  if (flash && flash.r.h <= 40) {                   // рамка вокруг нажатого — только кнопки и блоки
+    const r = flash.r, c = '#fff3d0';
+    R(r.x - 1, r.y - 1, r.w + 2, 1, c); R(r.x - 1, r.y + r.h, r.w + 2, 1, c);
+    R(r.x - 1, r.y - 1, 1, r.h + 2, c); R(r.x + r.w, r.y - 1, 1, r.h + 2, c);
+  }
+  sctx.clearRect(0, 0, screenCv.width, screenCv.height);
+  sctx.drawImage(buf, 0, 0, LW, LH, 0, 0, LW * S, LH * S);
+}
+
+/* Порода за пределами города: кадр никогда не упирается в пустой фон — в
+   альбоме раньше две трети экрана были чистым #0d0a12. По бокам колонны и
+   ниже забоя — сплошной камень пласта с крапом и редким декором: корни у
+   поверхности, кости и прожилки глубже. Всё детерминировано хешем. */
+function drawBackdrop(cam) {
+  const y0 = L.view.y, hh = L.view.h;
+  const lw = Math.max(0, L.x0 - 4);
+  const rx = Math.min(LW, L.x0 + L.colW + 4);
+  for (let n = Math.max(1, Math.floor(cam / yarusH()) - 1); ; n++) {
+    const top = worldTop(n);
+    if (top - cam > hh) break;
+    const h = yarusH(), sy = y0 + top - cam, s = stratum(n);
+    const side = shade(s.dark, .8);
+    R(0, sy, lw, h, side);
+    if (rx < LW) R(rx, sy, LW - rx, h, side);
+    if (n > st.yarus) R(lw, sy, rx - lw, h, s.rock);   // нетронутая толща
+    for (let k = 0; k < 14; k++) {                     // крап
+      const px = Math.floor(hash(n * 517 + k * 89 + 13) * LW);
+      const py = sy + Math.floor(hash(n * 91 + k * 7 + 5) * h);
+      const inCol = px >= lw && px < rx;
+      if (inCol && n <= st.yarus) continue;            // город рисует себя сам
+      R(px, py, 2, 1, shade(inCol ? s.rock : side, .72));
+    }
+    const si = stratumIdx(n);
+    const decor = (bx, by, hd, base) => {
+      if (si <= 1) { for (let i = 0; i < 6; i++) R(bx + ((i * 3) % 5), by + i, 1, 2, '#4a3420'); }
+      else if (hd < .1) { R(bx, by + 2, 5, 1, '#a8a094'); R(bx + 1, by, 1, 5, '#a8a094'); }
+      else if (s.ore > 0 && hd < .2) { for (let i = 0; i < 4; i++) R(bx + i * 2, by + (i & 1), 2, 1, shade(s.oreCol, .5)); }
+      else { for (let i = 0; i < 7; i++) R(bx + ((i & 2) >> 1), by + i, 1, 1, shade(base, .6)); }
+    };
+    for (let sideI = 0; sideI < 2; sideI++) {          // редкий декор по бокам
+      const hd = hash(n * 733 + sideI * 271 + 31);
+      if (hd > .3) continue;
+      const zone = sideI === 0 ? Math.max(1, lw - 8) : Math.max(1, LW - rx - 8);
+      if (zone < 6) continue;
+      const bx = (sideI === 0 ? 0 : rx) + Math.floor(hash(n * 11 + sideI * 5 + 3) * zone);
+      const by = sy + 4 + Math.floor(hash(n * 29 + sideI) * (h - 12));
+      decor(bx, by, hd, side);
+    }
+    if (n > st.yarus) {                                // и в нетронутой толще
+      const hd = hash(n * 977 + 41);
+      if (hd < .5) decor(lw + 6 + Math.floor(hash(n * 13 + 9) * (rx - lw - 16)),
+                         sy + 4 + Math.floor(hash(n * 37 + 3) * (h - 12)), hd * .6, s.rock);
+    }
+  }
+}
+
+/* Виньетка — «затемнение краёв кадра, сильное и холодное» из арт-тезиса.
+   Кэшируется в отдельный канвас при resize: альфа там только 0/255,
+   полутонов нет — канон соблюдён, а цена в кадре — один drawImage. */
+function buildVignette() {
+  vigCv = document.createElement('canvas'); vigCv.width = LW; vigCv.height = LH;
+  const x = vigCv.getContext('2d'); x.fillStyle = '#0b0912';
+  const h = L.view.h, y0 = L.view.y;
+  for (let yy = 0; yy < h; yy++) for (let d = 0; d < 7; d++) {
+    const on = d < 2 || (d < 4 ? ((yy + d) & 1) === 0 : ((yy + d) & 3) === 0);
+    if (on) { x.fillRect(d, y0 + yy, 1, 1); x.fillRect(LW - 1 - d, y0 + yy, 1, 1); }
+  }
+  for (let xx = 0; xx < LW; xx++) for (let d = 0; d < 5; d++) {
+    const on = d < 1 || (d < 3 ? ((xx + d) & 1) === 0 : ((xx + d) & 3) === 0);
+    if (on) x.fillRect(xx, y0 + h - 1 - d, 1, 1);
+  }
+  for (let cy = 0; cy < 10; cy++) for (let cx = 0; cx < 10; cx++)
+    if (cx + cy < 10 && ((cx + cy) & 1) === 0) {
+      x.fillRect(cx, y0 + cy, 1, 1); x.fillRect(LW - 1 - cx, y0 + cy, 1, 1);
+      x.fillRect(cx, y0 + h - 1 - cy, 1, 1); x.fillRect(LW - 1 - cx, y0 + h - 1 - cy, 1, 1);
+    }
+}
+
+function drawSurface(cam) {
+  const sy = L.view.y - SURFACE_H - cam;
+  if (sy > L.view.y + L.view.h || sy + SURFACE_H < L.view.y) return;
+  R(0, sy, LW, SURFACE_H, '#2a3a55');
+  R(0, sy, LW, 6, '#222f47');                                     // тёмный зенит
+  for (let i = 0; i < 22; i++) {
+    if (((i + (frame >> 5)) % 5) === 0) continue;                 // мерцание
+    R((i * 53 + 11) % LW, sy + 3 + (i * 17) % 22, 1, 1, i % 3 ? '#4a5c7a' : '#8fa3c8');
+  }
+  const mx = (L.x0 + 9) % (LW - 8);                               // луна
+  R(mx, sy + 6, 5, 5, '#e8e4d0'); R(mx, sy + 6, 1, 1, '#2a3a55'); R(mx + 4, sy + 10, 1, 1, '#2a3a55'); R(mx + 3, sy + 7, 1, 1, '#c8c4b0');
+  R(0, sy + SURFACE_H - 10, LW, 10, '#3d5a2e');
+  R(0, sy + SURFACE_H - 10, LW, 2, '#5c8a42');
+  for (let i = 0; i < 9; i++) {                                   // трава пучками
+    const gx2 = (i * 29 + 5) % LW;
+    R(gx2, sy + SURFACE_H - 12, 1, 2, '#5c8a42'); R(gx2 + 2, sy + SURFACE_H - 11, 1, 1, '#4a7236');
+  }
+  const gcx = L.shaftX + L.shaft / 2;
+  const gy = sy + SURFACE_H - 10 - SH('gate') + 3;   // ворота в рост дварфа
+  spr('gate', gcx - Math.floor(SW('gate') / 2), gy);
+  R(gcx - 12, gy - 5, 1, 6, '#4a3420'); R(gcx + 11, gy - 5, 1, 6, '#4a3420');
+  R(gcx - 11, gy - 5, 3, 2, '#c94a3a'); R(gcx + 12, gy - 5, 3, 2, '#c94a3a');
+  // труба кузни рядом с воротами и дым — движение покоя на поверхности
+  R(gcx + 17, gy + 2, 3, 12, '#474d61'); R(gcx + 16, gy + 1, 5, 2, '#5a6070');
+  for (let i = 0; i < 3; i++) {
+    const ph = ((frame >> 3) + i * 5) % 14, px = gcx + 18 + ((i + (ph >> 2)) & 1) - (ph > 7 ? 1 : 0);
+    if (ph < 12) R(px, gy + 1 - ph, ph > 6 ? 2 : 1, 1, ph > 8 ? '#3f4a68' : '#6b7290');
+  }
+  if (st.caravanT <= 0) spr('wagon', L.x0 + 2, sy + SURFACE_H - 10 - SH('wagon') + 3);
+  textC(T.caravan.toUpperCase(), L.shaftX + L.shaft / 2, sy + 5, st.caravanT <= 0 ? '#e8c34c' : '#7a8ba8', null);
+}
+
+function roomProps(o, hx, floorY, F4) {
+  const s = stratum(o.y);
+  const t = o.r.t;
+  if (t === 'bed') { for (let i = 0; i < Math.min(3, o.r.lvl); i++) spr('bed', hx + 3, floorY - SH('bed') - i * 7); }
+  else if (t === 'mine') { spr('cart', hx + 3, floorY - SH('cart'));
+    for (let i = 0; i < Math.min(6, o.r.lvl + 2); i++) R(hx + L.hall - 12 + (i % 3) * 4, floorY - 4 - ((i / 3) | 0) * 4, 3, 3, s.oreCol); }
+  else if (t === 'farm') { R(hx + 2, floorY - 2, L.hall - 4, 2, '#3a2a1a');
+    for (let i = 0; i < Math.min(4, o.r.lvl + 1); i++) spr('mush', hx + 3 + i * 9, floorY - SH('mush') - 1); }
+  else if (t === 'brew') { spr('vat', hx + 3, floorY - SH('vat'));
+    if (o.r.lvl > 1) spr('barrel', hx + L.hall - 13, floorY - SH('barrel')); }
+  else if (t === 'tavern') { spr('barrel', hx + L.hall - 13, floorY - SH('barrel'));
+    R(hx + 4, floorY - 9, 18, 2, '#7a5230'); R(hx + 6, floorY - 7, 2, 7, '#5a3a20'); R(hx + 18, floorY - 7, 2, 7, '#5a3a20');
+    spr('mug', hx + 7, floorY - 14); spr('mug', hx + 14, floorY - 14); }
+  else if (t === 'store') { for (let i = 0; i < Math.min(4, o.r.lvl + 1); i++) spr('crate', hx + 3 + (i % 2) * 11, floorY - SH('crate') - ((i / 2) | 0) * 7); }
+  else if (t === 'forge') { spr('anvil', hx + 3, floorY - SH('anvil')); spr('furnace', hx + L.hall - 15, floorY - SH('furnace'));
+    if (F4) R(hx + L.hall - 11, floorY - 8, 4, 3, '#ffcf5c'); }
+  else if (t === 'smelt') { spr('furnace', hx + 3, floorY - SH('furnace'));
+    if (F4) R(hx + 7, floorY - 8, 4, 3, '#ff8a2b'); spr('cart', hx + L.hall - 17, floorY - SH('cart')); }
+}
+
+function drawHall(n, sy, h, F2, cam) {
+  const s = stratum(n);
+  R(L.x0 - 4, sy, L.colW + 8, h, s.rock);
+  // ствол темнее залов: свет живёт там, куда его принесли
+  R(L.shaftX, sy, L.shaft, h, '#17121f');
+  for (let ry = sy + 1; ry < sy + h; ry += 5) R(L.shaftX + 3, ry, L.shaft - 6, 1, '#5a4025');
+  R(L.shaftX + 3, sy, 1, h, '#33240f'); R(L.shaftX + L.shaft - 4, sy, 1, h, '#33240f');
+  R(L.shaftX, sy, L.shaft, 2, '#4a2f1a'); R(L.shaftX, sy, L.shaft, 1, '#6b4526');   // балка ствола
+  for (let slot = 0; slot < 2; slot++) {
+    const hx = slot === 0 ? L.x0 : L.shaftX + L.shaft;
+    const key = n + ':' + slot, room = st.rooms[key], floorY = sy + h - 3;
+    const lit2 = !!room;
+    /* СВЕТ. Факел есть только в построенном зале: ближняя к нему половина
+       кладки ярче, дальняя темнее, шов между ними — шашечка. Пустой слот
+       стоит силуэтом без источника — построить зал значит принести свет. */
+    const nearLeft = slot === 1;                    // факел со стороны ствола
+    const f1 = lit2 ? 1.1 : .52, f2 = lit2 ? .78 : .45;
+    const g = lit2 ? 1 : .55;                       // крепёж и доски гаснут тоже
+    const wHalf = Math.floor(L.hall / 2);
+    const xA = nearLeft ? hx : hx + wHalf;
+    const xB = nearLeft ? hx + wHalf : hx;
+    const wA = nearLeft ? wHalf : L.hall - wHalf, wB = L.hall - wA;
+    const backA = shade(s.hall, .84 * f1), backB = shade(s.hall, .84 * f2);
+    const seamA = shade(s.hall, .66 * f1), seamB = shade(s.hall, .66 * f2);
+    R(xA, sy + 1, wA, h - 3, backA);
+    R(xB, sy + 1, wB, h - 3, backB);
+    for (let yy = sy + 2; yy < sy + h - 4; yy += 2)  // дизеринг на границе света
+      R(hx + wHalf - ((yy >> 1) & 1), yy, 1, 1, (yy & 2) ? backA : backB);
+    for (let yy = sy + 6; yy < sy + h - 7; yy += 4) { // кладка
+      R(hx + 2, yy, wHalf - 2, 1, nearLeft ? seamA : seamB);
+      R(hx + wHalf, yy, L.hall - wHalf - 2, 1, nearLeft ? seamB : seamA);
+      for (let xx = hx + (((yy >> 2) & 1) ? 5 : 9); xx < hx + L.hall - 2; xx += 8)
+        R(xx, yy - 3, 1, 3, ((xx < hx + wHalf) === nearLeft) ? seamA : seamB);
+    }
+    R(xA, sy + h - 6, wA, 3, shade('#5a3a22', f1)); R(xB, sy + h - 6, wB, 3, shade('#5a3a22', f2));
+    R(xA, sy + h - 6, wA, 1, shade('#6f4a2c', f1)); R(xB, sy + h - 6, wB, 1, shade('#6f4a2c', f2));
+    for (let xx = hx + 5; xx < hx + L.hall - 2; xx += 9) R(xx, sy + h - 5, 1, 2, shade('#4a2f1c', g));
+    R(hx, sy + h - 3, L.hall, 2, s.dark);
+    R(hx, sy, L.hall, 1, s.dark);
+    R(hx, sy + 1, 2, h - 4, shade('#6b4a2a', g)); R(hx, sy + 1, 1, h - 4, shade('#8a5f36', g));
+    R(hx + L.hall - 2, sy + 1, 2, h - 4, shade('#6b4a2a', g)); R(hx + L.hall - 1, sy + 1, 1, h - 4, shade('#4a3420', g));
+    R(hx, sy + 1, L.hall, 2, shade('#6b4a2a', g)); R(hx, sy + 1, L.hall, 1, shade('#8a5f36', g));
+    if (lit2) {
+      // ореол дышит вместе с пламенем: радиус и тон чуть гуляют
+      const tx = slot === 0 ? hx + L.hall - 5 : hx + 2;
+      const flick = (frame >> 3) & 1;
+      const glow = shade(s.hall, 1.2 + flick * .08);
+      const rr = 13 + flick * 3;
+      for (let gy = -2; gy <= 6; gy++) for (let gx = -4; gx <= 6; gx++)
+        if (((gx + gy) & 1) === 0 && gx * gx + gy * gy <= rr) {
+          const px = tx + 1 + gx, py = sy + 7 + gy;
+          if (px > hx + 1 && px < hx + L.hall - 2 && py > sy + 3 && py < sy + h - 6) R(px, py, 1, 1, glow);
+        }
+      spr(F2 ? 'torch' : 'torch2', tx, sy + 4);
+    }
+    if (!room) {
+      // ЯВНАЯ плашка постройки. Слово не влезает в зал 44 px, поэтому крупный «+»
+      // в рамке: понятно без языка, а названия комнат — уже в панели по тапу.
+      const avail = availableRooms(n), any = avail.some(d => st.stone >= roomCost(d.t, n));
+      const tgt = st.tut === 2 ? (firstFreeSlot(true) || firstFreeSlot()) : null;
+      const isTgt = tgt && tgt.y === n && tgt.slot === slot;
+      const pulse = isTgt || (any && pulseKey === key);
+      const bs = 15, bx = hx + Math.floor((L.hall - bs) / 2), by = sy + Math.floor(h / 2) - 8;
+      slab(bx, by, bs, bs, any ? '#35592f' : '#26202f');
+      spr(any ? 'plus' : 'plusOff', bx + 5, by + 5);
+      if (pulse && ((frame >> 4) % 2 || isTgt)) {
+        const gl = isTgt ? '#ffd24a' : '#8fd48a';
+        R(bx - 2, by - 2, bs + 4, 1, gl); R(bx - 2, by + bs + 1, bs + 4, 1, gl);
+        R(bx - 2, by - 2, 1, bs + 4, gl); R(bx + bs + 1, by - 2, 1, bs + 4, gl);
+      }
+      if (isTgt) text('↓', bx + 6, by - 10 + ((frame >> 3) % 2), '#ffd24a');
+      hits.push({ r: { x: hx, y: sy, w: L.hall, h }, fn: () => { build = { y: n, slot }; uiT = 0; Sound.open(); } });
+    } else {
+      roomProps({ y: n, slot, r: room }, hx, floorY, (frame >> 3) & 1);
+      if (room.lvl > 1) text(String(room.lvl), hx + 2, sy + 3, '#e8c34c', null);
+      hits.push({ r: { x: hx, y: sy, w: L.hall, h }, fn: () => openUI({ kind: 'room', y: n, slot }) });
+    }
+  }
+}
+
+function drawFace(n, sy) {
+  const s = stratum(n), rows = CFG.ROWS;
+  R(L.x0 - 4, sy, L.colW + 8, rows * BLOCK, s.rock);
+  if (st.row > 0) {
+    R(L.x0, sy, L.colW, st.row * BLOCK, '#1d1626');
+    for (let ry = sy + 1; ry < sy + st.row * BLOCK; ry += 5) R(L.shaftX + 3, ry, L.shaft - 6, 1, '#6b4a2a');
+  }
+  const ry = sy + st.row * BLOCK;
+  R(L.x0 - 4, ry - 1, L.colW + 8, 1, '#e8a33c');
+  for (let c = 0; c < CFG.BLOCK_W; c++) {
+    const bx = L.x0 + c * BLOCK, type = st.types[c] || 'rock';
+    const full = blockHp(n, type), left = st.blocks[c] === undefined ? full : st.blocks[c];
+    if (left <= 0) { R(bx, ry, BLOCK, BLOCK, '#1d1626'); continue; }
+    R(bx, ry, BLOCK, BLOCK, type === 'cave' ? s.dark : s.rock);
+    R(bx, ry, BLOCK, 1, s.dark); R(bx, ry, 1, BLOCK, s.dark);
+    if (type === 'rock') for (let i = 0; i < 3; i++)   // фактура: крапины и блик
+      R(bx + 2 + ((c * 11 + i * 23 + n * 7) % 12), ry + 2 + ((c * 5 + i * 17 + n * 3) % 12),
+        i ? 1 : 2, 1, i === 2 ? shade(s.rock, 1.14) : s.dark);
+    if (type === 'vein') {
+      for (let i = 0; i < 5; i++) R(bx + 2 + ((c * 5 + i * 7) % 12), ry + 2 + ((i * 5 + c) % 12), 2, 2, s.oreCol);
+      // блик на руде — единственное «право на яркий акцент» по арт-тезису
+      const gi = ((frame >> 2) + c * 5 + n) % 28;
+      if (gi < 5) R(bx + 2 + ((c * 5 + gi * 7) % 12), ry + 2 + ((gi * 5 + c) % 12), 1, 1, '#fff3b0');
+    }
+    if (type === 'crystal') { const cc = '#7fd8e8';
+      R(bx + 7, ry + 3, 2, 10, cc); R(bx + 5, ry + 6, 2, 6, cc); R(bx + 9, ry + 5, 2, 7, cc);
+      const sp = ((frame >> 3) + c) % 3; R(bx + 6 + sp * 2, ry + 4 + sp, 1, 1, '#dffaff'); }   // искра гуляет
+    if (type === 'water') for (let i = 0; i < 4; i++)
+      R(bx + 2, ry + 3 + i * 3, 12, 2, ((i + (frame >> 4)) & 1) ? '#2f6aa8' : '#3f86c8');   // рябь
+    if (type === 'cave') R(bx + 3, ry + 4, 10, 8, '#120d18');
+    const stage = Math.min(3, Math.floor((1 - left / full) * 4));
+    for (let i = 0; i < stage * 3; i++) {
+      const a = (c * 7 + i * 31) % 360 * Math.PI / 180;
+      let px = bx + 8, py = ry + 8;
+      for (let s2 = 0; s2 < 3 + i % 3; s2++) { px += Math.cos(a) * 1.5; py += Math.sin(a) * 1.5; R(px, py, 1, 1, s.dark); }
+    }
+    if (press && press.col === c) {                   // долгий тап: полоса набирается 380 мс
+      const k = Math.min(1, (performance.now() - press.t0) / 380);
+      R(bx + 1, ry + BLOCK - 3, Math.round((BLOCK - 2) * k), 2, '#ffd24a');
+    }
+    if (st.prio[c]) {
+      R(bx, ry, BLOCK, 1, '#ffd24a'); R(bx, ry + BLOCK - 1, BLOCK, 1, '#ffd24a');
+      R(bx, ry, 1, BLOCK, '#ffd24a'); R(bx + BLOCK - 1, ry, 1, BLOCK, '#ffd24a');
+      text('*', bx + 6, ry + 5, '#ffd24a', null);
+    }
+    const scrY = L.view.y + worldTop(n) + st.row * BLOCK - Math.round(st.camY);
+    hits.push({ r: { x: bx, y: scrY, w: BLOCK, h: BLOCK }, fn: () => {
+      tapDamage(c, bx + 8, worldTop(n) + st.row * BLOCK + 8);
+      press = { col: c, t0: performance.now() };
+    } });
+  }
+  // крепь встала: ряд заколочен деревом, пока выше не построят зал
+  if (digLocked()) {
+    R(L.x0 - 4, ry - 1, L.colW + 8, 2, '#5a3a20'); R(L.x0 - 4, ry - 1, L.colW + 8, 1, '#7a5230');
+    R(L.x0 - 4, ry + BLOCK - 2, L.colW + 8, 2, '#5a3a20'); R(L.x0 - 4, ry + BLOCK - 2, L.colW + 8, 1, '#7a5230');
+    for (let c = 0; c <= CFG.BLOCK_W; c++) {
+      const px = L.x0 + c * BLOCK - 1;
+      R(px, ry, 2, BLOCK, '#6b4a2a'); R(px, ry, 1, BLOCK, '#8a5f36');
+    }
+  }
+  if (st.row + 1 < rows) {
+    const uy = ry + BLOCK, uh = (rows - st.row - 1) * BLOCK;
+    const dim = shade(s.dark, .72);          // без альфы: канон
+    R(L.x0, uy, L.colW, uh, s.dark);
+    for (let c = 1; c < CFG.BLOCK_W; c++) R(L.x0 + c * BLOCK, uy, 1, uh, dim);
+    for (let r2 = 0; r2 < rows - st.row - 1; r2++) R(L.x0, uy + r2 * BLOCK, L.colW, 1, dim);
+  }
+}
+
+function drawDwarf(d, cam, F4) {
+  // d.y — линия ног; спрайт растёт вверх от неё. Профильные спрайты
+  // зеркалятся по d.dir, чтобы дварф смотрел туда, куда идёт.
+  // Фаза анимации своя у каждого: на общем F4 семеро в забое махали киркой
+  // синхронно и читались как один клонированный ряд. Берём её из имени —
+  // тогда она стабильна и живёт в старых сейвах без новых полей.
+  const k = d.task ? d.task.kind : 'idle', v = '_' + (d.c || 0);
+  const ph = (F4 + (d.n1 || 0) + (d.n2 || 0)) & 1;
+  let name;
+  if (k === 'sleep' && !d.moving) name = 'sleep' + v;
+  else if (d.moving || k === 'drink' || k === 'idle') name = (ph ? 'dwarf' : 'dwarf2') + v;
+  else name = (ph ? 'miner' : 'miner2') + v;
+  const hh = SH(name), sy = L.view.y + Math.round(d.y) - hh - cam;
+  if (sy > L.view.y + L.view.h || sy + hh < L.view.y) return;
+  const x = Math.round(d.x);
+  spr(name + (d.dir < 0 ? 'L' : ''), x, sy);
+  if (k === 'sleep' && !d.moving) { if ((frame >> 5) % 2) text('Z', x + 13, sy - 4, '#9ec4e8', null); }
+  else if (k === 'drink' && !d.moving) spr('mug', x + (d.dir < 0 ? -4 : 12), sy + 7);
+  if (d.mood <= CFG.MOOD_DRINK) R(x + 5, sy - 4, 3, 3, '#e05a5a');
+  else if (d.fat >= CFG.FAT_SLEEP) R(x + 5, sy - 4, 3, 3, '#e8c34c');
+}
+
+function drawMinimap() {
+  const m = L.map, total = worldBottom() + SURFACE_H;
+  R(m.x - 1, m.y - 1, m.w + 2, m.h + 2, '#1a1424');
+  const toMap = wy => m.y + Math.round((wy + SURFACE_H) / total * m.h);
+  R(m.x, m.y, m.w, 2, '#3d5a2e');
+  const COL = { mine: '#c07a3a', bed: '#9ec4e8', brew: '#c98a3a', tavern: '#e8a33c',
+                farm: '#7fc46a', store: '#c8b090', forge: '#8a8f96', smelt: '#ff8a2b' };
+  roomList().forEach(o => R(m.x, toMap(worldTop(o.y)), m.w, 1, COL[o.r.t] || '#888'));
+  R(m.x, toMap(worldBottom()) - 1, m.w, 2, '#e8a33c');
+  const v0 = toMap(st.camY), v1 = toMap(st.camY + L.view.h);
+  R(m.x - 1, v0, 1, Math.max(2, v1 - v0), '#f0e6d2');
+  R(m.x + m.w, v0, 1, Math.max(2, v1 - v0), '#f0e6d2');
+  hits.push({ r: { x: m.x - 2, y: m.y - 1, w: m.w + 4, h: m.h + 2 }, fn: p => {
+    st.camFree = true;
+    st.camY = Math.max(camMin(), Math.min(camMax(), Math.round((p.y - m.y) / m.h * total - SURFACE_H - L.view.h / 2)));
+  } });
+}
+
+/* ── HUD с иконками и подписями ── */
+function chip(ic, val, x, y, col, warn) {
+  spr(ic, x, y + 1);
+  text(val, x + 7, y, warn ? '#e05a5a' : col, '#140e1c');
+  return x + 7 + textW(val) + 6;
+}
+function drawHUD() {
+  R(0, 0, LW, HUD_H, '#1a1424');
+  R(0, 0, LW, 1, '#2f2842');
+  R(0, HUD_H - 1, LW, 1, '#0d0a12');
+  const s = stratum(st.yarus);
+  const depthS = fmt(st.yarus * 4) + ' ' + T.depth;
+  text(depthS, 4, 3, '#f0e6d2');
+  textR(fitText(T.strata[stratumIdx(st.yarus)], LW - 60), LW - 4, 3, s.oreCol, null);
+  // кнопка звука: в v1 st.muted существовал, а выключателя не было
+  const mx = 4 + textW(depthS) + 9, mCol = st.muted ? '#6b6280' : '#b8aed4';
+  R(mx, 5, 2, 3, mCol); R(mx + 2, 4, 1, 5, mCol); R(mx + 3, 3, 1, 7, mCol);
+  if (st.muted) {
+    R(mx + 5, 4, 1, 1, '#e05a5a'); R(mx + 6, 5, 1, 1, '#e05a5a'); R(mx + 7, 6, 1, 1, '#e05a5a');
+    R(mx + 7, 4, 1, 1, '#e05a5a'); R(mx + 5, 6, 1, 1, '#e05a5a');
+  } else {
+    R(mx + 5, 4, 1, 1, mCol); R(mx + 5, 8, 1, 1, mCol); R(mx + 6, 5, 1, 3, mCol);
+  }
+  hits.push({ r: { x: mx - 2, y: 1, w: 13, h: 12 }, fn: () => {
+    st.muted = !st.muted; Sound.setMuted(st.muted || document.hidden); dirty = true;
+  } });
+  // Чипы влезают только пока хватает места: при LW=125 их было пять и они
+  // наезжали и друг на друга, и на счётчик дварфов. Рисуем, пока есть запас.
+  const pop = st.dwarves.length, beds = bedsTotal(), cap = storeCap();
+  const dw = pop + '/' + beds, dwX = LW - 8 - textW(dw) - 7;
+  // до конца туториала не краснеем: «2/0» алым на первой секунде новой игры
+  // выглядело как ошибка игрока, который ещё ничего не сделал
+  const warn = pop >= Math.max(2, beds) && st.tut >= TUT_MAX;
+  spr('iDwarf', dwX, 15);
+  textR(dw, LW - 4, 14, warn ? '#e05a5a' : '#9ec4e8');
+  const list = [['iStone', fmt(st.stone), '#d8cfc0', st.stone >= cap * .98, 'stone'], ['iGold', fmt(st.gold), '#e8c34c', false, 'gold']];
+  if (st.gems > 0) list.push(['iGem', fmt(st.gems), '#7fd8e8', false, 'gems']);
+  if (has('tavern') || has('brew') || st.ale >= 1) list.push(['iAle', fmt(st.ale), '#c98a3a', has('tavern') && st.ale < 1, 'ale']);
+  let x = 4;
+  for (const [ic, v, col, w, k] of list) {
+    if (x + 7 + textW(v) > dwX - 4) break;
+    x = chip(ic, v, x, 14, hudFlash[k] > 0 ? shade(col, 1.45) : col, w);   // сдвиг вправо на ширину чипа
+  }
+  if (st.rage > 0) { R(0, HUD_H - 3, Math.round(LW * st.rage / CFG.RAGE_TIME), 2, '#ff8a2b'); }
+}
+/* Одна полоса под HUD на три вида сообщений, по приоритету: свежая подсказка,
+   шаг туториала, беда колонии. Иначе туториал вообще не показывался, а падение
+   настроения до нуля было видно только красной точкой над дварфом. */
+function drawStrip() {
+  let s = null, bg = '#241d33', fg = '#e8dcc8';
+  if (hint) s = hint;
+  else if (digLocked()) { s = T.needSupports; bg = '#4a2430'; fg = '#ffb0b0'; }
+  else if (st.tut < TUT_MAX) { s = T.tut[st.tut]; bg = '#2a3a55'; fg = '#cfe0f0'; }
+  else {
+    const avgMood = st.dwarves.reduce((a, d) => a + d.mood, 0) / Math.max(1, st.dwarves.length);
+    if (st.dwarves.length >= Math.max(2, bedsTotal())) { s = T.noBeds; bg = '#4a2430'; fg = '#ffb0b0'; }
+    else if (avgMood < 40 && (!has('tavern') || st.ale < 1)) { s = T.noAle; bg = '#4a3a24'; fg = '#ffd8a0'; }
+    else if (st.stone >= storeCap() * .98) { s = T.full; bg = '#4a3a24'; fg = '#ffd8a0'; }
+  }
+  if (!s) return;
+  const w = Math.min(LW - 12, textW(s) + 10);
+  const x = Math.floor((LW - w) / 2), y = HUD_H + 3;
+  R(x, y, w, 11, bg); R(x, y, w, 1, shade(bg, .6));
+  textC(fitText(s, w - 6), x + w / 2, y + 2, fg, null);
+}
+
+/* ── нижний бар ── */
+// Кнопки бара — иконками, а не словами: четыре подписи в 118 px обрезались
+// до «КУ. КА. КО. ДВ.» и не читались ни на одном языке.
+function barButtons() {
+  return [
+    { k: 'forge', ic: 'anvil', on: has('forge'), col: '#4a4a6b' },
+    { k: 'caravan', ic: 'wagon', on: st.deepest >= 4, col: st.caravanT <= 0 ? '#6b5a2a' : '#4a4436' },
+    { k: 'contracts', ic: 'scroll', on: st.deepest >= 6, col: '#4a3a6b' },
+    { k: 'dwarves', ic: 'iDwarf', on: true, col: '#3a3358' },
+  ].filter(x => x.on);
+}
+function drawBar() {
+  const y = LH - BAR_H;
+  R(0, y, LW, BAR_H, '#1a1424'); R(0, y, LW, 1, '#0d0a12');
+  const bs = barButtons();
+  const back = st.camFree, backW = 16;
+  const total = LW - 6 - (back ? backW + 3 : 0);
+  // в альбоме кнопки не растягиваются на всю ширину — гигантские плашки с
+  // крошечной иконкой выглядели дёшево; группа прижимается к центру
+  const bw = Math.min(52, Math.floor((total - (bs.length - 1) * 3) / bs.length));
+  const x00 = Math.floor((total - (bw * bs.length + (bs.length - 1) * 3)) / 2) + 3;
+  bs.forEach((b, i) => {
+    const bx = x00 + i * (bw + 3);
+    slab(bx, y + 4, bw, BAR_H - 8, b.col);
+    spr(b.ic, bx + Math.floor((bw - SW(b.ic)) / 2), y + 6);
+    let sub = '';
+    if (b.k === 'caravan') sub = st.caravanT > 0 ? clock(st.caravanT) : '!';
+    else if (b.k === 'dwarves') sub = String(st.dwarves.length);
+    else if (b.k === 'contracts') sub = st.contracts.filter(canDeliver).length + '/3';
+    else if (b.k === 'forge') sub = (canPick() && st.gold >= pickCost()) ? '!' : '';
+    if (sub) textC(sub, bx + bw / 2, y + 15, sub === '!' ? '#ffd24a' : '#d8cfe8', '#140e1c');
+    hits.push({ r: { x: bx, y: y + 4, w: bw, h: BAR_H - 8 }, fn: () => openUI({ kind: b.k }) });
+  });
+  if (back) {
+    const bx = LW - backW - 3;
+    slab(bx, y + 4, backW, BAR_H - 8, '#4a3a6b');
+    textC('↓', bx + backW / 2, y + 9, '#ded0ff');
+    hits.push({ r: { x: bx, y: y + 4, w: backW, h: BAR_H - 8 }, fn: () => { st.camFree = false; } });
+  }
+}
+
+/* ═══════════════ Экраны ═══════════════ */
+function panel(titleStr, h) {
+  const w = Math.min(112, LW - 6);
+  // въезд снизу за ~100 мс: всё содержимое идёт за p.y, так что одного
+  // сдвига хватает на всю панель
+  const slide = Math.round((1 - Math.min(1, uiT / .1)) * 8);
+  const x = Math.floor((LW - w) / 2), y = Math.max(HUD_H + 2, Math.floor((LH - h) / 2)) + slide;
+  R(x - 2, y - 2, w + 4, h + 4, '#0d0a12');
+  slab(x, y, w, h, '#241d33');
+  slab(x, y, w, 11, '#2e2745');
+  textC(titleStr.toUpperCase(), x + w / 2, y + 3, '#d8cff0', null);
+  return { x, y, w, h };
+}
+// у каждой цены — иконка валюты: камень, золото или самоцвет
+function btn(p, label, sub, y, enabled, fn, col, icon) {
+  const bx = p.x + 4, bw = p.w - 8;
+  slab(bx, y, bw, 14, enabled ? (col || '#3d6b3a') : '#2a2436');
+  const subW = sub ? textW(sub) : 0, icoW = icon ? 8 : 0;
+  text(fitText(label, bw - subW - icoW - 12), bx + 4, y + 4, enabled ? '#eaffea' : '#6b6280', null);
+  if (icon) spr(icon, bx + bw - 4 - subW - 8, y + 4);
+  if (sub) textR(sub, bx + bw - 4, y + 4, enabled ? '#d8cfc0' : '#6b6280', null);
+  if (enabled) hits.push({ r: { x: bx, y, w: bw, h: 14 }, fn });
+  return y + 16;
+}
+// двухстрочная кнопка: имя на своей строке, цена на своей — «СНАРЯЖЕНИ.» и
+// «ВАГОНЕТКА .» больше не случаются
+function btn2(p, label, sub, y, enabled, fn, col, icon) {
+  const bx = p.x + 4, bw = p.w - 8;
+  slab(bx, y, bw, 20, enabled ? (col || '#3d6b3a') : '#2a2436');
+  text(fitText(label, bw - 8), bx + 4, y + 3, enabled ? '#eaffea' : '#6b6280', null);
+  const subW = sub ? textW(sub) : 0;
+  if (icon) spr(icon, bx + bw - 4 - subW - 8, y + 12);
+  if (sub) textR(sub, bx + bw - 4, y + 11, enabled ? '#d8cfc0' : '#6b6280', null);
+  if (enabled) hits.push({ r: { x: bx, y, w: bw, h: 20 }, fn });
+  return y + 22;
+}
+function closeAt(p) {
+  hits.push({ r: { x: 0, y: 0, w: LW, h: LH }, fn: closeUI });
+  const s = 9;
+  R(p.x + p.w - s - 2, p.y + 2, s, s, '#4a3a4a');
+  textC('×', p.x + p.w - s / 2 - 2, p.y + 3, '#e8c8c8', null);
+  hits.push({ r: { x: p.x + p.w - s - 4, y: p.y, w: s + 4, h: s + 4 }, fn: closeUI });
+}
+function drawUI() {
+  hits.push({ r: { x: 0, y: 0, w: LW, h: LH }, fn: () => {} });
+  if (ui.kind === 'dwarves') return drawDwarvesScreen();
+  if (ui.kind === 'forge') return drawForge();
+  if (ui.kind === 'caravan') return drawCaravan();
+  if (ui.kind === 'contracts') return drawContracts();
+  if (ui.kind === 'room') return drawRoomScreen();
+  if (ui.kind === 'popup') return drawPopup();
+}
+
+/* Цепочка «что → во что» иконками. Одного названия комнаты мало: «штрек»
+   игрок просто не понял, и до постройки было неясно, зачем она нужна. */
+const PROD = { mine: [null, 'iOre'], bed: [null, 'iDwarf'], farm: [null, 'iMush'], brew: ['iMush', 'iAle'],
+               tavern: ['iAle', 'iMood'], store: ['iStone', null], forge: ['iGold', null], smelt: ['iOre', 'iGold'] };
+
+function drawBuildPanel() {
+  const avail = availableRooms(build.y), RH = 23;
+  const p = panel(T.build, 16 + avail.length * RH + 4);
+  hits.push({ r: { x: 0, y: 0, w: LW, h: LH }, fn: () => { build = null; } });
+  let y = p.y + 14;
+  avail.forEach(d => {
+    const cost = roomCost(d.t, build.y), ok = st.stone >= cost;
+    const bx = p.x + 4, bw = p.w - 8, cs = fmt(cost);
+    slab(bx, y, bw, RH - 2, ok ? '#3d6b3a' : '#2a2436');
+    text(fitText(T.rooms[d.t], bw - textW(cs) - 18), bx + 4, y + 3, ok ? '#eaffea' : '#6b6280', null);
+    spr('iStone', bx + bw - 4 - textW(cs) - 8, y + 3);
+    textR(cs, bx + bw - 4, y + 3, ok ? '#d8cfc0' : '#6b6280', null);
+    const pr = PROD[d.t] || [null, null];
+    let ix = bx + 4;
+    if (pr[0]) { spr(pr[0], ix, y + 12); ix += 8; }
+    if (pr[0] && pr[1]) { text('→', ix, y + 11, '#8f86a8', null); ix += 8; }
+    if (pr[1]) { spr(pr[1], ix, y + 12); ix += 8; }
+    text(fitText(T.roomWhat[d.t], bx + bw - ix - 6), ix + 2, y + 11, ok ? '#a9d0a9' : '#5a5470', null);
+    if (ok) hits.push({ r: { x: bx, y, w: bw, h: RH - 2 },
+      fn: () => { if (doBuild(d.t, build.y, build.slot)) build = null; } });
+    y += RH;
+  });
+  const s2 = 9;
+  R(p.x + p.w - s2 - 2, p.y + 2, s2, s2, '#4a3a4a');
+  textC('×', p.x + p.w - s2 / 2 - 2, p.y + 3, '#e8c8c8', null);
+  hits.push({ r: { x: p.x + p.w - s2 - 4, y: p.y, w: s2 + 4, h: s2 + 4 }, fn: () => { build = null; } });
+}
+
+function drawRoomScreen() {
+  const o = { y: ui.y, slot: ui.slot, r: st.rooms[ui.y + ':' + ui.slot] };
+  if (!o.r) { closeUI(); return; }
+  const p = panel(T.rooms[o.r.t], 92);
+  closeAt(p);
+  text(fitText(T.roomWhat[o.r.t], p.w - 8), p.x + 4, p.y + 14, '#a99fc0', null);
+  // цепочка «что → во что» иконками: главный ответ на вопрос про ресурсы
+  const pr = PROD[o.r.t] || [null, null];
+  let px = p.x + 4;
+  if (pr[0]) { spr(pr[0], px, p.y + 24); px += 8; }
+  if (pr[0] && pr[1]) { text('→', px, p.y + 23, '#8f86a8', null); px += 9; }
+  if (pr[1]) spr(pr[1], px, p.y + 24);
+  textR(T.lvl + ' ' + o.r.lvl + '/' + CFG.ROOM_LVL_MAX + '  ×' + roomOut(o.r.lvl).toFixed(2), p.x + p.w - 4, p.y + 23, '#e8c34c', null);
+  // кто сейчас внутри: работники / спящие / пьющие — комната видна как живая
+  const def = roomDef(o.r.t);
+  const occ = def.hands ? busyIn('room', o.y, o.slot) + '/' + def.hands
+            : o.r.t === 'bed' ? busyIn('sleep', o.y, o.slot) + '/' + (2 * o.r.lvl)
+            : o.r.t === 'tavern' ? String(busyIn('drink', o.y, o.slot)) : null;
+  if (occ !== null) { spr('iDwarf', p.x + 4, p.y + 34); text(occ, p.x + 13, p.y + 33, '#9ec4e8', null); }
+  const maxed = o.r.lvl >= CFG.ROOM_LVL_MAX;
+  const cost = maxed ? 0 : roomLvlCost(o.y, o.r.lvl);
+  const bump = () => { o.r.lvl = Math.min(CFG.ROOM_LVL_MAX, o.r.lvl + 1); Sound.upgrade(); };
+  let y = btn(p, maxed ? T.maxed : T.upgrade, maxed ? '' : fmt(cost), p.y + 43,
+    !maxed && st.stone >= cost, () => doUpgradeRoom(o), undefined, maxed ? null : 'iStone');
+  y = btn(p, T.instant, T.ad, y, !maxed, () => rewarded(bump), '#5a4a2a');
+  y = btn(p, T.instant, String(CFG.GEM_INSTANT), y, !maxed && st.gems >= CFG.GEM_INSTANT,
+    () => { st.gems -= CFG.GEM_INSTANT; bump(); dirty = true; }, '#2a4a5a', 'iGem');
+}
+
+function drawForge() {
+  const p = panel(T.forgeT, 130);
+  closeAt(p);
+  let y = p.y + 14;
+  const pc = pickCost(), nextY = CFG.PICK_YARUS[Math.min(st.pick + 1, CFG.PICK_YARUS.length - 1)];
+  y = btn2(p, T.pick + ' ' + (st.pick + 2) + '  ×' + CFG.PICK_STEP.toFixed(2), canPick() ? fmt(pc) : (T.tierAt + ' ' + nextY),
+    y, canPick() && st.gold >= pc, () => { st.gold -= pc; st.pick++; Sound.clang(); dirty = true; },
+    undefined, canPick() ? 'iGold' : null);
+  const gc = gearCost();
+  y = btn2(p, T.gear + ' ' + (st.gear + 1), fmt(gc), y, st.gold >= gc,
+    () => { st.gold -= gc; st.gear++; Sound.clang(); dirty = true; }, undefined, 'iGold');
+  const cc = cartCost();
+  y = btn2(p, T.cart + ' ' + (st.cart + 1), st.cart >= CFG.CART_MAX ? T.maxed : fmt(cc),
+    y, st.cart < CFG.CART_MAX && st.gold >= cc, () => { st.gold -= cc; st.cart++; Sound.clang(); dirty = true; },
+    undefined, st.cart >= CFG.CART_MAX ? null : 'iGold');
+  // подписи эффектов двумя строками: в одну они сталкивались посередине
+  text(T.effGear + ' ×' + gearM().toFixed(2), p.x + 4, y + 1, '#8f86a8', null);
+  textR(T.effOff + ' ' + Math.round(offProd() * 100) + '%', p.x + p.w - 4, y + 9, '#8f86a8', null);
+  y += 18;
+  const rage = () => { st.rage = CFG.RAGE_TIME; say(T.rageOn); Sound.rage(); };
+  y = btn(p, T.rage + ' ×' + CFG.RAGE_MULT, T.ad, y, st.rage <= 0, () => rewarded(rage), '#5a4a2a');
+  y = btn(p, T.rage + ' ×' + CFG.RAGE_MULT, String(CFG.GEM_RAGE), y, st.rage <= 0 && st.gems >= CFG.GEM_RAGE,
+    () => { st.gems -= CFG.GEM_RAGE; rage(); dirty = true; }, '#2a4a5a', 'iGem');
+}
+
+function drawCaravan() {
+  const rows = [];
+  for (let i = 1; i <= 5; i++) {
+    if (st.ore[i] > 0) rows.push({ n: T.ores[i], q: st.ore[i], v: st.ore[i] * orePrice(i) });
+    if (st.ingot[i] > 0) rows.push({ n: T.ores[i] + '+', q: st.ingot[i], v: st.ingot[i] * orePrice(i) * CFG.INGOT_MULT });
+  }
+  const p = panel(T.caravan, 20 + Math.max(1, rows.length) * 9 + 54 + (st.caravanT <= 0 ? 10 : 0));
+  closeAt(p);
+  let y = p.y + 14;
+  if (!rows.length) { text('—', p.x + 4, y, '#6b6280', null); y += 9; }
+  rows.forEach(r => {
+    spr('iOre', p.x + 4, y + 1);
+    text(fitText(r.n, 38), p.x + 12, y, '#d8cfc0', null);
+    text('×' + fmt(r.q), p.x + 52, y, '#a99fc0', null);
+    textR(fmt(r.v), p.x + p.w - 12, y, '#e8c34c', null);
+    spr('iGold', p.x + p.w - 10, y + 1);
+    y += 9;
+  });
+  y += 4;
+  const v = stockValue(), vb = v * caravanMult();
+  if (st.caravanT <= 0) {                 // фургон у ворот — цена выше
+    textC(T.bonus, p.x + p.w / 2, y, '#e8c34c', null);
+    y += 10;
+  }
+  y = btn(p, T.sellAll, fmt(vb), y, v > 0, () => { sellAll(1); closeUI(); }, undefined, 'iGold');
+  y = btn(p, T.sellX2, fmt(vb * 2), y, v > 0, () => rewarded(() => { sellAll(2); closeUI(); }), '#5a4a2a', 'iGold');
+  // наём за золото — альтернатива ожиданию иммигранта, и заодно сток золота
+  const hc = hireCost(), canH = st.dwarves.length < CFG.POP_CAP && st.gold >= hc;
+  y = btn(p, T.hire, fmt(hc), y, canH, () => { st.gold -= hc; addDwarf(); Sound.build(); }, '#3a4a6b', 'iGold');
+}
+
+function drawContracts() {
+  const p = panel(T.contracts, 16 + st.contracts.length * 30 + 22);
+  closeAt(p);
+  let y = p.y + 14;
+  st.contracts.forEach((c, i) => {
+    const ok = canDeliver(c);
+    R(p.x + 4, y, p.w - 8, 27, i % 2 ? '#1f1a2e' : '#2a2340');
+    let tx = p.x + 7;
+    c.items.forEach(it => {
+      const nm = it.kind === 'ale' ? T.ale : (T.ores[it.i] + (it.kind === 'ingot' ? '+' : ''));
+      const have = it.kind === 'ale' ? st.ale : it.kind === 'ingot' ? st.ingot[it.i] : st.ore[it.i];
+      const s2 = fitText(nm, 40) + ' ' + fmt(it.q);
+      if (tx + textW(s2) > p.x + p.w - 10) return;
+      text(s2, tx, y + 3, have >= it.q ? '#8fd48a' : '#e0a05a', null);
+      tx += textW(s2) + 6;
+    });
+    // награда — иконками, а не словом: «НАГРАДА: 192» не влезала рядом с
+    // кнопкой и обрезалась так, что пропадало само число
+    const bw = 34, bx = p.x + p.w - bw - 6;
+    spr('iGold', p.x + 7, y + 15);
+    text(fmt(c.gold), p.x + 16, y + 14, '#e8c34c', null);
+    const gx = p.x + 20 + textW(fmt(c.gold));
+    spr('iGem', gx, y + 15);
+    text('+' + c.gems, gx + 9, y + 14, '#7fd8e8', null);
+    R(bx, y + 10, bw, 12, ok ? '#3d6b3a' : '#2a2436');
+    textC(T.deliver, bx + bw / 2, y + 13, ok ? '#eaffea' : '#6b6280', null);
+    if (ok) hits.push({ r: { x: bx, y: y + 10, w: bw, h: 12 }, fn: () => deliver(i) });
+    y += 30;
+  });
+  // смена — явная кнопка с пометкой рекламы; тап по строке контракта в v1
+  // без предупреждения запускал rewarded-ролик
+  y = btn(p, T.reroll, T.ad, y + 2, true,
+    () => rewarded(() => { st.contracts = []; refillContracts(); }), '#5a4a2a');
+}
+
+function drawDwarvesScreen() {
+  R(0, HUD_H, LW, LH - HUD_H - BAR_H, '#181322');
+  // отдельная шапка со счётчиком и крестиком: раньше крестик садился прямо
+  // на статус первой карточки
+  const HD = 12;
+  R(0, HUD_H, LW, HD, '#241d33');
+  // Предупреждение занимает правый край, поэтому заголовок усекаем под него:
+  // «ДВАРФЫ 24/44» и «КОНЧИЛСЯ ЭЛЬ!» налезали друг на друга.
+  const wStr = st.dwarves.length >= Math.max(2, bedsTotal()) ? T.noBeds
+             : (has('tavern') && st.ale < 1 ? T.noAle : '');
+  const wW = wStr ? textW(wStr) + 6 : 0;
+  text(fitText(T.dwarves + ' ' + st.dwarves.length + '/' + bedsTotal(), LW - 22 - wW),
+       4, HUD_H + 3, '#c8bfe0', null);
+  if (wStr) textR(wStr, LW - 16, HUD_H + 3, wStr === T.noBeds ? '#ffb0b0' : '#ffd8a0', null);
+  const CH = 30, top = HUD_H + HD + 2;   // карточка выше: дварф v2 ростом 21 px
+  const maxScroll = Math.max(0, st.dwarves.length * CH - (L.view.h - HD - 20));
+  scrollY = Math.min(scrollY, maxScroll);
+  ctx.save(); ctx.beginPath(); ctx.rect(0, HUD_H + HD, LW, LH - HUD_H - BAR_H - HD - 16); ctx.clip();
+  st.dwarves.forEach((d, i) => {
+    const cy = top + i * CH - Math.round(scrollY);
+    if (cy > LH - BAR_H || cy + CH < HUD_H) return;
+    const cw = LW - 4;
+    R(2, cy, cw, CH - 2, i % 2 ? '#1f1a2e' : '#241d33');
+    spr((d.moving ? 'dwarf_' : 'miner_') + (d.c || 0), 3, cy + 4);
+    const k = d.moving ? 'walk' : (d.task ? d.task.kind : 'idle');
+    text(dName(d), 20, cy + 3, '#f0e6d2', null);
+    textR(T.task[k] || '', cw - 2, cy + 3, '#a99fc0', null);
+    text(fitText(dSur(d), 58), 20, cy + 12, '#8f86a8', null);
+    text(d.lvl + ' ' + T.traits[d.ti], 20, cy + 21, '#c9a227', null);
+    const bw = 26, bx = cw - bw - 2;
+    R(bx, cy + 13, bw, 3, '#3a3248'); R(bx, cy + 13, Math.round(bw * d.mood / 100), 3, d.mood <= CFG.MOOD_DRINK ? '#e05a5a' : '#5cc46a');
+    R(bx, cy + 20, bw, 3, '#3a3248'); R(bx, cy + 20, Math.round(bw * d.fat / 100), 3, d.fat >= CFG.FAT_SLEEP ? '#e8c34c' : '#7a6f8c');
+    hits.push({ r: { x: 2, y: Math.max(HUD_H, cy), w: cw, h: CH - 2 }, fn: () => {
+      closeUI(); st.camFree = true;
+      st.camY = Math.max(camMin(), Math.min(camMax(), Math.round(d.y - L.view.h / 2)));
+    } });
+  });
+  ctx.restore();
+  R(0, HUD_H, LW, 1, '#0d0a12');
+  const pop = st.dwarves.length;
+  const room = pop < CFG.POP_CAP;
+  const call = () => { addDwarf(); Sound.build(); };
+  // короткие подписи: «позвать дварфа» дважды в 118 px не влезает даже усечённым
+  const by = LH - BAR_H - 15, hw = Math.floor((LW - 12) / 2);
+  slab(4, by, hw, 13, room ? '#5a4a2a' : '#2a2436');
+  textC('+1  ' + T.ad, 4 + hw / 2, by + 3, room ? '#ffe0a0' : '#6b6280', null);
+  if (room) hits.push({ r: { x: 4, y: by, w: hw, h: 13 }, fn: () => rewarded(call) });
+  const okG = room && st.gems >= CFG.GEM_DWARF;
+  slab(8 + hw, by, hw, 13, okG ? '#2a4a5a' : '#2a2436');
+  const l2 = '+1 ' + CFG.GEM_DWARF, l2x = 8 + hw + Math.floor((hw - textW(l2) - 8) / 2);
+  text(l2, l2x, by + 3, okG ? '#a0e0ff' : '#6b6280', null);
+  spr('iGem', l2x + textW(l2) + 2, by + 4);
+  if (okG) hits.push({ r: { x: 8 + hw, y: by, w: hw, h: 13 }, fn: () => { st.gems -= CFG.GEM_DWARF; call(); } });
+  const cs = 9;
+  R(LW - cs - 3, HUD_H + 2, cs, cs, '#4a3a4a');
+  textC('×', LW - cs / 2 - 3, HUD_H + 3, '#e8c8c8', null);
+  hits.push({ r: { x: LW - cs - 5, y: HUD_H, w: cs + 5, h: cs + 4 }, fn: closeUI });
+}
+
+function drawPopup() {
+  const s = ui.sum, dl = ui.daily;
+  const rows = [];
+  if (s) {
+    if (s.yarus > 0) rows.push([T.depth.toUpperCase(), '+' + s.yarus]);
+    if (s.stone > 1) rows.push([T.stone, '+' + fmt(s.stone)]);
+    for (let i = 1; i <= 5; i++) if (s.ore[i] > 1) rows.push([T.ores[i], '+' + fmt(s.ore[i])]);
+    if (s.ale > 1) rows.push([T.ale, '+' + fmt(s.ale)]);
+  }
+  if (dl) {
+    rows.push([T.day + ' ' + dl.day + '/' + CFG.DAILY.length, '']);
+    if (dl.g) rows.push([T.gold, '+' + fmt(dl.g)]);
+    if (dl.gem) rows.push([T.gems, '+' + dl.gem]);
+  }
+  const p = panel(ui.title, 20 + Math.max(1, rows.length) * 9 + 36);
+  let y = p.y + 14;
+  if (!rows.length) { text('—', p.x + 4, y, '#6b6280', null); y += 9; }
+  rows.forEach(r => { text(r[0], p.x + 4, y, '#d8cfc0', null); textR(r[1], p.x + p.w - 4, y, '#e8c34c', null); y += 9; });
+  y += 4;
+  y = btn(p, T.x2, '', y, true, () => rewarded(() => {
+    // ×2 удваивает всё показанное, включая эль — раньше он был в списке,
+    // но не в удвоении, и попап немного врал
+    if (s) { st.stone = capped(st.stone + s.stone); st.ale = capped(st.ale + Math.max(0, s.ale));
+             for (let i = 1; i <= 5; i++) st.ore[i] = capped(st.ore[i] + s.ore[i]); }
+    if (dl) { if (dl.g) st.gold += dl.g; if (dl.gem) st.gems += dl.gem; }
+    closeUI();
+  }), '#5a4a2a');
+  y = btn(p, T.ok, '', y, true, closeUI, '#3d3a6b');
+}
+
+/* ═══════════════ Старт ═══════════════ */
+(async function main() {
+  buildSprites();
+  await YSDK.init();
+  T = (YSDK.lang === 'ru' || YSDK.lang === 'be' || YSDK.lang === 'kk' || YSDK.lang === 'uk') ? I18N.ru : I18N.en;
+  document.documentElement.lang = T === I18N.ru ? 'ru' : 'en';
+  resize();
+  await loadGame();
+  Sound.setMuted(!!st.muted);
+  st.camY = camTarget();
+  draw();
+  YSDK.gameReady();
+  YSDK.gameplayStart();
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>

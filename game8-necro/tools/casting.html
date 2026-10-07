@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<meta charset="utf-8">
+<title>Некро · кастинг</title>
+<!--
+  Кастинг: кто кого играет. Слева наши роли (16 видов нежити, 6 героев) с именами
+  RU/EN, справа все 1600 тайлов монстров Dungeon Crawl Stone Soup (public domain).
+  Клик по роли делает её активной, клик по тайлу отдаёт тайл ей.
+
+  «Сохранить» пишет art/casting.json через /upload из serve.js. Игру этот файл не
+  трогает: тайлы скачиваются и имена переезжают в data.js / i18n.js отдельным
+  шагом, по команде. Индекс тайлов лежит в art/dcss-mon-index.json — снят с GitHub
+  один раз, чтобы не упираться в лимит API на каждой загрузке страницы.
+-->
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #0a0810; color: #c9c2b4; font: 13px/1.35 system-ui, sans-serif; height: 100vh; display: flex; flex-direction: column; }
+  header { padding: 8px 14px; border-bottom: 1px solid #3a2e2b; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+  h1 { margin: 0; font-size: 15px; color: #e6dcc0; }
+  button { background: #1e3a2a; color: #8dffb0; border: 1px solid #3f8f5c; border-radius: 4px; padding: 5px 12px; cursor: pointer; font: inherit; }
+  button.ghost { background: transparent; color: #c9c2b4; border-color: #3a2e2b; }
+  #status { color: #8a8070; font-size: 12px; }
+  main { flex: 1; display: flex; min-height: 0; }
+  #roles { width: min(460px, 42vw); flex: 0 0 auto; overflow: auto; border-right: 1px solid #3a2e2b; }
+  .grp { padding: 8px 12px 2px; color: #8dffb0; font-weight: 700; }
+  .role { display: flex; gap: 8px; align-items: center; padding: 5px 12px; cursor: pointer; border-left: 3px solid transparent; }
+  .role:hover { background: #14100f; }
+  .role.on { background: #1e3a2a; border-left-color: #8dffb0; }
+  .role canvas { width: 64px; height: 64px; image-rendering: pixelated; background: #241d1c; border-radius: 3px; flex: 0 0 auto; }
+  .role .f { flex: 1; min-width: 0; }
+  .role .k { font-size: 10px; color: #8a8070; }
+  .role .t { font-size: 10px; color: #6a7d94; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .role input { width: 100%; background: #0a0810; color: #e6dcc0; border: 1px solid #3a2e2b; border-radius: 3px; padding: 2px 5px; font: inherit; margin-top: 2px; }
+  .role input.en { color: #9fb2c4; font-size: 12px; }
+  .role input.changed { border-color: #b5601c; }
+  #gal { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  #filters { padding: 8px 12px; display: flex; gap: 8px; align-items: center; border-bottom: 1px solid #1c1716; flex-wrap: wrap; }
+  #filters select, #filters input { background: #0a0810; color: #e6dcc0; border: 1px solid #3a2e2b; border-radius: 3px; padding: 4px 6px; font: inherit; }
+  #tiles { flex: 1; overflow: auto; padding: 10px; display: grid; grid-template-columns: repeat(auto-fill, minmax(92px, 1fr)); gap: 6px; align-content: start; }
+  .tile { background: #241d1c; border: 2px solid transparent; border-radius: 4px; padding: 3px; cursor: pointer; text-align: center; }
+  .tile:hover { border-color: #52413c; }
+  .tile.used { border-color: #3f8f5c; }
+  .tile img { width: 64px; height: 64px; image-rendering: pixelated; display: block; margin: 0 auto; }
+  .tile span { display: block; font-size: 10px; color: #8a8070; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tile b { display: block; font-size: 9px; color: #8dffb0; font-weight: 400; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+</style>
+<header>
+  <h1>Кастинг «Подземелья Некроманта»</h1>
+  <button id="save">Сохранить</button>
+  <button id="reset-names" class="ghost">Вернуть имена из игры</button>
+  <span id="status"></span>
+</header>
+<main>
+  <div id="roles"></div>
+  <div id="gal">
+    <div id="filters">
+      <select id="dir"></select>
+      <input id="q" placeholder="поиск: skelet, lich, knight…" size="26">
+      <span id="count" style="color:#8a8070"></span>
+    </div>
+    <div id="tiles"></div>
+  </div>
+</main>
+
+<script type="module">
+import { UNDEAD, HEROES, SCHOOLS } from '../data.js';
+
+const BASE = 'https://raw.githubusercontent.com/crawl/crawl/master/crawl-ref/source/rltiles/mon/';
+const SAVE_PATH = 'game8-necro/art/casting.json';
+const $ = id => document.getElementById(id);
+const status = t => { $('status').textContent = t; };
+
+// EN-имена живут словарём в i18n.js и наружу не экспортируются — читаем исходник
+const i18nSrc = await (await fetch('../i18n.js')).text();
+const block = name => {
+  const m = i18nSrc.match(new RegExp(name + ':\\s*\\{([^}]*)\\}'));
+  const o = {};
+  if (m) for (const [, k, v] of m[1].matchAll(/(\w+):\s*'([^']*)'/g)) o[k] = v;
+  return o;
+};
+const EN = { ...block('units'), ...block('heroes') };
+
+// Роли и имена «как в игре сейчас»: от них считается, что игрок поменял
+const ROLES = [];
+for (const s of Object.keys(SCHOOLS)) {
+  for (const u of Object.values(UNDEAD).filter(u => u.school === s).sort((a, b) => a.tier - b.tier)) {
+    ROLES.push({ key: u.id, group: SCHOOLS[s].name || s, sub: `T${u.tier}`, ru: u.name, en: EN[u.id] || '' });
+  }
+}
+for (const h of Object.values(HEROES)) ROLES.push({ key: h.id, group: 'Герои', sub: '', ru: h.name, en: EN[h.id] || '' });
+const ORIGINAL = Object.fromEntries(ROLES.map(r => [r.key, { ru: r.ru, en: r.en }]));
+
+// Состояние: сохранённый casting.json, иначе выбор со страницы _pick-tiles, иначе пусто
+let cast = {};
+try {
+  const r = await fetch('../art/casting.json', { cache: 'no-store' });
+  if (r.ok) cast = await r.json();
+} catch {}
+if (!Object.keys(cast).length) {
+  try {
+    const old = JSON.parse(localStorage.getItem('necro_pick') || '{}');
+    for (const [k, p] of Object.entries(old)) cast[k] = { tile: p };
+  } catch {}
+}
+try {
+  const draft = JSON.parse(localStorage.getItem('necro_cast_draft') || 'null');
+  if (draft) cast = draft;
+} catch {}
+for (const r of ROLES) cast[r.key] = { tile: '', ru: r.ru, en: r.en, ...cast[r.key] };
+
+let active = ROLES[0].key;
+let dirty = false;
+// Черновик в браузере страхует от закрытой вкладки до «Сохранить»
+const markDirty = () => {
+  dirty = true; status('есть несохранённые изменения');
+  try { localStorage.setItem('necro_cast_draft', JSON.stringify(cast)); } catch {}
+};
+
+/* ═══ Роли ═══ */
+const roleEls = {};
+function drawThumb(cv, path) {
+  const x = cv.getContext('2d');
+  x.clearRect(0, 0, 32, 32);
+  if (!path) return;
+  const img = new Image();
+  img.onload = () => { x.imageSmoothingEnabled = false; x.clearRect(0, 0, 32, 32); x.drawImage(img, 0, 0, 32, 32); };
+  img.src = BASE + path + '.png';
+}
+let lastGroup = '';
+for (const r of ROLES) {
+  if (r.group !== lastGroup) {
+    const g = document.createElement('div'); g.className = 'grp'; g.textContent = r.group; $('roles').append(g);
+    lastGroup = r.group;
+  }
+  const el = document.createElement('div'); el.className = 'role';
+  const cv = document.createElement('canvas'); cv.width = 32; cv.height = 32;
+  const f = document.createElement('div'); f.className = 'f';
+  f.innerHTML = `<div class="k">${r.key}${r.sub ? ' · ' + r.sub : ''}</div>`;
+  const ru = document.createElement('input'); ru.value = cast[r.key].ru; ru.title = 'Имя по-русски';
+  const en = document.createElement('input'); en.value = cast[r.key].en; en.className = 'en'; en.title = 'Name in English';
+  const t = document.createElement('div'); t.className = 't';
+  const sync = () => {
+    ru.classList.toggle('changed', ru.value !== ORIGINAL[r.key].ru);
+    en.classList.toggle('changed', en.value !== ORIGINAL[r.key].en);
+    t.textContent = cast[r.key].tile ? cast[r.key].tile : 'тайл не выбран';
+  };
+  ru.oninput = () => { cast[r.key].ru = ru.value; sync(); markDirty(); };
+  en.oninput = () => { cast[r.key].en = en.value; sync(); markDirty(); };
+  f.append(ru, en, t);
+  el.append(cv, f);
+  el.onclick = e => { if (e.target.tagName !== 'INPUT') setActive(r.key); };
+  ru.onfocus = en.onfocus = () => setActive(r.key);
+  $('roles').append(el);
+  roleEls[r.key] = { el, cv, sync, ru, en };
+  drawThumb(cv, cast[r.key].tile);
+  sync();
+}
+function setActive(k) {
+  active = k;
+  for (const [key, o] of Object.entries(roleEls)) o.el.classList.toggle('on', key === k);
+}
+setActive(active);
+
+/* ═══ Галерея ═══ */
+// Щупальца — сегменты, а не существа; в кастинг им нечего делать
+const ALL = (await (await fetch('../art/dcss-mon-index.json')).json())
+  .filter(p => !p.startsWith('tentacles/'))
+  .map(p => p.replace(/\.png$/, ''));
+const dirs = [...new Set(ALL.map(p => p.split('/').slice(0, -1).join('/')))].sort();
+$('dir').innerHTML = `<option value="">все папки (${ALL.length})</option>` +
+  dirs.map(d => `<option value="${d}">${d} (${ALL.filter(p => p.startsWith(d + '/') && p.split('/').length === d.split('/').length + 1).length})</option>`).join('');
+$('dir').value = 'undead';
+
+const usedBy = () => {
+  const m = {};
+  for (const [k, v] of Object.entries(cast)) if (v.tile) (m[v.tile] ||= []).push(k);
+  return m;
+};
+
+/* Плитки строятся ОДИН раз и дальше только прячутся и подписываются. Первая версия
+   пересобирала галерею на каждый клик, картинки заново шли с GitHub, и сетка на
+   секунды пустела — со стороны это выглядело как «кастинг не работает». */
+const tileEls = new Map();
+for (const p of ALL) {
+  const t = document.createElement('div');
+  t.className = 'tile';
+  t.title = p;
+  t.style.display = 'none';
+  const s = document.createElement('span'); s.textContent = p.split('/').pop();
+  const b = document.createElement('b');
+  t.append(s, b);
+  t.onclick = () => assign(p);
+  tileEls.set(p, { t, b, img: null });
+  $('tiles').append(t);
+}
+
+function assign(p) {
+  cast[active].tile = p;
+  drawThumb(roleEls[active].cv, p);
+  roleEls[active].sync();
+  markDirty();
+  markUsed();
+  // Следующая роль без тайла становится активной: кастинг идёт подряд
+  const i = ROLES.findIndex(r => r.key === active);
+  const next = ROLES.slice(i + 1).find(r => !cast[r.key].tile);
+  if (next) { setActive(next.key); roleEls[next.key].el.scrollIntoView({ block: 'nearest' }); }
+}
+
+function markUsed() {
+  const used = usedBy();
+  for (const [p, o] of tileEls) {
+    o.t.classList.toggle('used', !!used[p]);
+    o.b.textContent = used[p] ? '→ ' + used[p].join(', ') : '';
+  }
+}
+
+function filterTiles() {
+  const d = $('dir').value, q = $('q').value.trim().toLowerCase();
+  let n = 0;
+  for (const [p, o] of tileEls) {
+    const show = (!d || p.split('/').slice(0, -1).join('/') === d) && (!q || p.toLowerCase().includes(q));
+    o.t.style.display = show ? '' : 'none';
+    if (show) {
+      n++;
+      // Картинка создаётся при первом показе и дальше живёт в плитке
+      if (!o.img) {
+        o.img = document.createElement('img');
+        o.img.loading = 'lazy';
+        o.img.src = BASE + p + '.png';
+        o.img.onerror = () => { o.t.remove(); tileEls.delete(p); };
+        o.t.prepend(o.img);
+      }
+    }
+  }
+  $('count').textContent = `${n} тайлов`;
+}
+$('dir').onchange = filterTiles;
+$('q').oninput = () => { if ($('q').value) $('dir').value = ''; filterTiles(); };
+markUsed();
+filterTiles();
+
+/* ═══ Сохранение ═══ */
+$('save').onclick = async () => {
+  const json = JSON.stringify(cast, null, 2);
+  const b64 = btoa(unescape(encodeURIComponent(json)));
+  const r = await fetch('/upload?file=' + encodeURIComponent(SAVE_PATH), { method: 'POST', body: b64 });
+  if (r.ok) { dirty = false; try { localStorage.removeItem('necro_cast_draft'); } catch {} status('сохранено в art/casting.json · ' + new Date().toLocaleTimeString()); }
+  else status('ошибка сохранения: ' + r.status);
+};
+$('reset-names').onclick = () => {
+  for (const r of ROLES) {
+    cast[r.key].ru = ORIGINAL[r.key].ru; cast[r.key].en = ORIGINAL[r.key].en;
+    roleEls[r.key].ru.value = r.ru; roleEls[r.key].en.value = r.en; roleEls[r.key].sync();
+  }
+  markDirty();
+};
+addEventListener('beforeunload', e => { if (dirty) e.preventDefault(); });
+status(Object.values(cast).filter(v => v.tile).length + ' из ' + ROLES.length + ' ролей с тайлом');
+window.__cast = { cast, ROLES };
+</script>

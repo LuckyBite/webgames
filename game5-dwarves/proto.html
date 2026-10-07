@@ -1,0 +1,807 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Дварфы-копатели — прототип</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { height: 100%; overflow: hidden; background: #0d0a12; }
+  body { user-select: none; -webkit-user-select: none; }
+  #game { position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%);
+    touch-action: none; display: block; image-rendering: pixelated; image-rendering: crisp-edges; }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<script>
+/* ═══════════════════════════════════════════════════════════════════════════
+   «Дварфы-копатели» — ПРОТОТИП v3: колония.
+   Проверяет: живут ли автономные дварфы, читается ли их поведение без подписей,
+   и даёт ли забой из разных блоков осмысленный выбор.
+
+   Дварф НИКОГДА не назначается игроком. Он выбирает дело сам по пяти правилам
+   и физически идёт к нему по лестнице. Игрок влияет косвенно: строит комнаты,
+   метит блоки долгим тапом, держит эль и койки.
+
+   Упрощения против спеки: нет грибной фермы (пивоварня варит эль напрямую),
+   нет насоса — вода просто вшестеро крепче, нет снаряжения и глобальной морали,
+   нет сейвов, YSDK, рекламы, i18n, каравана как объекта, контрактов.
+   Числа — из docs/superpowers/sim/deep-city-economy.js.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+const CFG = {
+  GROWTH: 1.12,
+  T_START: 200, T_PLATO: 242, T_RAMP: 30, T_DRIFT: 1.5, PILA_POW: 0.5,
+  PICK_D0: 2, PICK_STEP: 2.35,
+  PICK_YARUS: [1, 8, 15, 22, 29, 36, 44, 52, 60, 68, 76, 84, 92, 100, 108, 116]
+    .concat(Array.from({ length: 40 }, (_, i) => 124 + i * 8)),
+  TAPS: 5, DIGGER: 0.55, BLOCK_W: 7,
+  ROWS_AT: [[1, 1], [3, 2], [6, 3]],
+  FACE_W: 0.12,
+  STONE0: 100, GOLD0: 0.55,
+  C_ROOM: 240, C_BED: 240, C_PICK: 1100,
+  IMMIGRATE: 20, POP_CAP: 24,
+  // колония
+  UPTIME_FULL: 0.75, LEVEL_MAX: 10, LEVEL_STEP: 0.08,
+  WORK_SPAN: 300, SLEEP_BED: 90, SLEEP_FLOOR: 210, DRINK_SPAN: 30,
+  MOOD_SPAN: 900, MOOD_LO: 0.70, MOOD_HI: 1.30, TRAIT_AVG: 1.03,
+  FAT_SLEEP: 85, MOOD_DRINK: 25,
+  WALK: 26,              // пикселей в секунду
+  ALE_PER_DRINK: 1, ALE_RATE: 0.05,
+  MIN_DIGGERS: 2,        // забой не оголяем: столько дварфов остаётся в нём всегда
+};
+
+const STRATA = [
+  { name: 'Земля и корни', from: 1,   rock: '#5d4028', dark: '#3a2718', hall: '#7a5636', ore: null,      oreCol: '#8a6a3a' },
+  { name: 'Известняк',     from: 6,   rock: '#a89e84', dark: '#6e6550', hall: '#c4bba2', ore: 'Медь',    oreCol: '#c07a3a' },
+  { name: 'Гранит',        from: 16,  rock: '#76737f', dark: '#4b4954', hall: '#918e9c', ore: 'Железо',  oreCol: '#b9c0c8' },
+  { name: 'Базальт',       from: 31,  rock: '#454250', dark: '#2a2833', hall: '#5e5a6c', ore: 'Серебро', oreCol: '#e2e9f0' },
+  { name: 'Обсидиан',      from: 51,  rock: '#382e4a', dark: '#211a2e', hall: '#4e4166', ore: 'Мифрил',  oreCol: '#7fd8e8' },
+  { name: 'Адамант',       from: 76,  rock: '#472d3a', dark: '#2b1a23', hall: '#613e50', ore: 'Адамант', oreCol: '#8ef08e' },
+  { name: 'Бездна',        from: 111, rock: '#272031', dark: '#15111c', hall: '#3a3049', ore: 'Адамант', oreCol: '#8ef08e' },
+];
+const stratum = n => { let s = STRATA[0]; for (const t of STRATA) if (n >= t.from) s = t; return s; };
+
+/* ── формулы из симулятора ── */
+const E = n => Math.pow(CFG.GROWTH, n - 1);
+const pickTier = n => { let t = 0; CFG.PICK_YARUS.forEach((y, i) => { if (n >= y) t = i; }); return t; };
+const pickStart = n => CFG.PICK_YARUS[pickTier(n)];
+const pickDmg = t => CFG.PICK_D0 * Math.pow(CFG.PICK_STEP, t);
+const rowsOf = n => { let r = 1; for (const [y, v] of CFG.ROWS_AT) if (n >= y) r = v; return r; };
+const slotsOf = n => rowsOf(n) === 1 ? 0 : 2;
+const expFace = n => Math.max(2, Math.min(CFG.BLOCK_W, Math.round(2 + n / 8)));
+const expLevel = n => Math.min(CFG.LEVEL_MAX, 1 + n / 15);
+const levelM = l => 1 + CFG.LEVEL_STEP * (l - 1);
+const dwarfM = n => CFG.UPTIME_FULL * levelM(expLevel(n)) * CFG.TRAIT_AVG;
+const REF = n => pickDmg(pickTier(n)) * (1 + CFG.FACE_W * (expFace(n) - 1) * dwarfM(n));
+function T(n) {
+  const k = Math.min(1, (n - 1) / (CFG.T_RAMP - 1));
+  const base = CFG.T_START + (CFG.T_PLATO - CFG.T_START) * k;
+  const drift = 1 + (CFG.T_DRIFT - 1) * Math.max(0, n - CFG.T_RAMP) / 90;
+  return base * drift * Math.pow(CFG.GROWTH, (n - pickStart(n)) * CFG.PILA_POW);
+}
+const hpOf = n => REF(n) * T(n) * rowsOf(n) / 3;
+const blockHp = n => hpOf(n) / (CFG.BLOCK_W * rowsOf(n));
+const stoneOf = n => CFG.STONE0 * E(n);
+const goldRate = n => CFG.GOLD0 * E(n);
+
+/* ── типы блоков ── */
+const BTYPE = {
+  rock:    { hp: 1,   name: 'Порода' },
+  vein:    { hp: 2.5, name: 'Жила' },
+  cave:    { hp: 0.1, name: 'Каверна' },
+  crystal: { hp: 5,   name: 'Кристалл' },
+  water:   { hp: 6,   name: 'Вода' },
+};
+const hash = v => { let x = (v * 2654435761) % 4294967296; x ^= x >>> 15; x = (x * 2246822519) % 4294967296; return (x >>> 0) / 4294967296; };
+function blockType(y, row, col) {
+  const s = stratum(y), r = hash(y * 9973 + row * 331 + col * 17 + 7);
+  if (y >= 31 && r < 0.04) return 'water';
+  if (y >= 16 && r < 0.08) return 'crystal';
+  if (r < 0.20) return 'cave';
+  if (s.ore && r < 0.46) return 'vein';
+  return 'rock';
+}
+
+/* ═══════════════ Пиксельный конвейер ═══════════════ */
+const screenCv = document.getElementById('game');
+const sctx = screenCv.getContext('2d');
+const buf = document.createElement('canvas');
+const ctx = buf.getContext('2d');
+let S = 4, LW = 125, LH = 270;
+
+function mk(rows, pal) {
+  const h = rows.length, w = rows[0].length;
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  const x = c.getContext('2d');
+  rows.forEach((row, y) => { for (let i = 0; i < row.length; i++) { const col = pal[row[i]]; if (col) { x.fillStyle = col; x.fillRect(i, y, 1, 1); } } });
+  return c;
+}
+function outline(src, col = '#1a1220') {
+  const w = src.width + 2, h = src.height + 2;
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  const x = c.getContext('2d');
+  x.drawImage(src, 1, 1);
+  const d = x.getImageData(0, 0, w, h), a = d.data;
+  const solid = (i, j) => i >= 0 && j >= 0 && i < w && j < h && a[(j * w + i) * 4 + 3] > 0;
+  x.fillStyle = col;
+  for (let j = 0; j < h; j++) for (let i = 0; i < w; i++)
+    if (a[(j * w + i) * 4 + 3] === 0 && (solid(i + 1, j) || solid(i - 1, j) || solid(i, j + 1) || solid(i, j - 1)))
+      x.fillRect(i, j, 1, 1);
+  return c;
+}
+const SPRITES = {};
+const SW = n => SPRITES[n].width, SH = n => SPRITES[n].height;
+function spr(name, x, y) { ctx.drawImage(SPRITES[name], Math.round(x), Math.round(y)); }
+const R = (x, y, w, h, c) => { ctx.fillStyle = c; ctx.fillRect(Math.round(x), Math.round(y), Math.round(w), Math.round(h)); };
+
+/* ═══════════════ Битмап-шрифт 5×7 ═══════════════ */
+const GLYPHS = {
+  A:'.###.|#...#|#...#|#####|#...#|#...#|#...#', B:'####.|#...#|#...#|####.|#...#|#...#|####.',
+  C:'.####|#....|#....|#....|#....|#....|.####', D:'####.|#...#|#...#|#...#|#...#|#...#|####.',
+  E:'#####|#....|#....|####.|#....|#....|#####', F:'#####|#....|#....|####.|#....|#....|#....',
+  G:'.####|#....|#....|#..##|#...#|#...#|.###.', H:'#...#|#...#|#...#|#####|#...#|#...#|#...#',
+  I:'#####|..#..|..#..|..#..|..#..|..#..|#####', J:'....#|....#|....#|....#|#...#|#...#|.###.',
+  K:'#...#|#..#.|#.#..|##...|#.#..|#..#.|#...#', L:'#....|#....|#....|#....|#....|#....|#####',
+  M:'#...#|##.##|#.#.#|#.#.#|#...#|#...#|#...#', N:'#...#|##..#|#.#.#|#.#.#|#..##|#...#|#...#',
+  O:'.###.|#...#|#...#|#...#|#...#|#...#|.###.', P:'####.|#...#|#...#|####.|#....|#....|#....',
+  Q:'.###.|#...#|#...#|#...#|#.#.#|#..#.|.##.#', R:'####.|#...#|#...#|####.|#.#..|#..#.|#...#',
+  S:'.####|#....|#....|.###.|....#|....#|####.', T:'#####|..#..|..#..|..#..|..#..|..#..|..#..',
+  U:'#...#|#...#|#...#|#...#|#...#|#...#|.###.', V:'#...#|#...#|#...#|#...#|#...#|.#.#.|..#..',
+  W:'#...#|#...#|#...#|#.#.#|#.#.#|##.##|#...#', X:'#...#|#...#|.#.#.|..#..|.#.#.|#...#|#...#',
+  Y:'#...#|#...#|.#.#.|..#..|..#..|..#..|..#..', Z:'#####|....#|...#.|..#..|.#...|#....|#####',
+  'Б':'####.|#....|#....|####.|#...#|#...#|####.', 'Г':'#####|#....|#....|#....|#....|#....|#....',
+  'Д':'.####|.#..#|.#..#|.#..#|.#..#|#####|#...#', 'Ж':'#.#.#|#.#.#|#.#.#|#####|#.#.#|#.#.#|#.#.#',
+  'З':'####.|....#|....#|.###.|....#|....#|####.', 'И':'#...#|#...#|#..##|#.#.#|##..#|#...#|#...#',
+  'Й':'.###.|#...#|#..##|#.#.#|##..#|#...#|#...#', 'Л':'..###|.##.#|.#..#|.#..#|.#..#|.#..#|#...#',
+  'П':'#####|#...#|#...#|#...#|#...#|#...#|#...#', 'У':'#...#|#...#|#...#|.####|....#|#...#|.###.',
+  'Ф':'..#..|.###.|#.#.#|#.#.#|#.#.#|.###.|..#..', 'Ц':'#..#.|#..#.|#..#.|#..#.|#..#.|#####|....#',
+  'Ч':'#...#|#...#|#...#|.####|....#|....#|....#', 'Ш':'#.#.#|#.#.#|#.#.#|#.#.#|#.#.#|#.#.#|#####',
+  'Щ':'#.#.#|#.#.#|#.#.#|#.#.#|#.#.#|#####|....#', 'Ъ':'##...|.#...|.#...|.###.|.#..#|.#..#|.###.',
+  'Ы':'#...#|#...#|##..#|#.#.#|#.#.#|#.#.#|##..#', 'Ь':'#....|#....|#....|####.|#...#|#...#|####.',
+  'Э':'####.|....#|....#|.####|....#|....#|####.', 'Ю':'#.##.|#.#.#|#.#.#|###.#|#.#.#|#.#.#|#.##.',
+  'Я':'.####|#...#|#...#|.####|..#.#|.#..#|#...#',
+  '0':'.###.|#...#|#..##|#.#.#|##..#|#...#|.###.', '1':'..#..|.##..|..#..|..#..|..#..|..#..|.###.',
+  '2':'.###.|#...#|....#|...#.|..#..|.#...|#####', '3':'#####|...#.|..##.|....#|....#|#...#|.###.',
+  '4':'...#.|..##.|.#.#.|#..#.|#####|...#.|...#.', '5':'#####|#....|####.|....#|....#|#...#|.###.',
+  '6':'..##.|.#...|#....|####.|#...#|#...#|.###.', '7':'#####|....#|...#.|..#..|.#...|.#...|.#...',
+  '8':'.###.|#...#|#...#|.###.|#...#|#...#|.###.', '9':'.###.|#...#|#...#|.####|....#|...#.|.##..',
+  '.':'.....|.....|.....|.....|.....|.##..|.##..', ',':'.....|.....|.....|.....|.##..|.##..|.#...',
+  ':':'.....|.##..|.##..|.....|.##..|.##..|.....', '!':'..#..|..#..|..#..|..#..|..#..|.....|..#..',
+  '?':'.###.|#...#|....#|...#.|..#..|.....|..#..', '-':'.....|.....|.....|#####|.....|.....|.....',
+  '+':'.....|..#..|..#..|#####|..#..|..#..|.....', '/':'....#|....#|...#.|..#..|.#...|#....|#....',
+  '(':'...#.|..#..|.#...|.#...|.#...|..#..|...#.', ')':'.#...|..#..|...#.|...#.|...#.|..#..|.#...',
+  '%':'##..#|##.#.|..#..|.#...|#.##.|..##.|.....', '×':'.....|#...#|.#.#.|..#..|.#.#.|#...#|.....',
+  '↑':'..#..|.###.|#.#.#|..#..|..#..|..#..|.....', '↓':'.....|..#..|..#..|..#..|#.#.#|.###.|..#..',
+  '*':'.....|#.#.#|.###.|#####|.###.|#.#.#|.....',
+  'М':'#...#|##.##|#.#.#|#.#.#|#...#|#...#|#...#',
+};
+Object.assign(GLYPHS, { 'А': GLYPHS.A, 'В': GLYPHS.B, 'Е': GLYPHS.E, 'Ё': GLYPHS.E, 'К': GLYPHS.K,
+  'Н': GLYPHS.H, 'О': GLYPHS.O, 'Р': GLYPHS.P, 'С': GLYPHS.C, 'Т': GLYPHS.T, 'Х': GLYPHS.X });
+const FONT = {}, FONT_H = 7, SPACE_W = 3, LETTER_SP = 1;
+(function () {
+  for (const ch in GLYPHS) {
+    const rows = GLYPHS[ch].split('|');
+    let lo = 5, hi = -1;
+    for (let c = 0; c < 5; c++) for (let r = 0; r < FONT_H; r++)
+      if (rows[r][c] === '#') { if (c < lo) lo = c; if (c > hi) hi = c; }
+    if (hi < 0) { FONT[ch] = { rows: [], w: SPACE_W }; continue; }
+    FONT[ch] = { rows: rows.map(r => r.slice(lo, hi + 1)), w: hi - lo + 1 };
+  }
+  FONT[' '] = { rows: [], w: SPACE_W };
+})();
+function textW(s) { let w = 0; for (const ch of String(s).toUpperCase()) w += (FONT[ch] || FONT[' ']).w + LETTER_SP; return Math.max(0, w - LETTER_SP); }
+function paintText(s, x, y, col) {
+  ctx.fillStyle = col; let cx = x;
+  for (const ch of String(s).toUpperCase()) {
+    const g = FONT[ch] || FONT[' '];
+    for (let r = 0; r < g.rows.length; r++) { const row = g.rows[r];
+      for (let c = 0; c < row.length; c++) if (row[c] === '#') ctx.fillRect(cx + c, y + r, 1, 1); }
+    cx += g.w + LETTER_SP;
+  }
+}
+function text(s, x, y, col, shadow = '#140e1c') {
+  x = Math.round(x); y = Math.round(y);
+  if (shadow) paintText(s, x + 1, y + 1, shadow);
+  paintText(s, x, y, col);
+}
+const textC = (s, cx, y, col, sh) => text(s, Math.round(cx - textW(s) / 2), y, col, sh);
+const textR = (s, rx, y, col, sh) => text(s, Math.round(rx - textW(s)), y, col, sh);
+const fmt = v => { const a = Math.abs(v);
+  if (a >= 1e9) return (v / 1e9).toFixed(1) + 'Б';
+  if (a >= 1e6) return (v / 1e6).toFixed(1) + 'М';
+  if (a >= 1e4) return (v / 1e3).toFixed(1) + 'К';
+  return String(Math.round(v)); };
+
+/* ═══════════════ Спрайты ═══════════════ */
+function buildSprites() {
+  const P = { h: '#c2542c', H: '#8f3a1c', s: '#e8b48a', b: '#ddd6c8', c: '#3f6ba8', C: '#2b4a78', k: '#4a3420', p: '#9aa4ae', w: '#7a5230' };
+  const body = ['..hhh..', '.hhhhh.', '.HHHHH.', '..sss..', '..bbb..', '.ccccc.', '.cc.cc.', '.k...k.'];
+  SPRITES.dwarf = outline(mk(body, P));
+  SPRITES.dwarf2 = outline(mk(body.slice(0, 6).concat(['.cc.cc.', '..k.k..']), P));
+  SPRITES.miner = outline(mk(['..hhh.p', '.hhhhhp', '.HHHHHw', '..sss.w', '..bbb..', '.ccccc.', '.cc.cc.', '.k...k.'], P));
+  SPRITES.miner2 = outline(mk(['..hhh..', '.hhhhh.', '.HHHHH.', '..sss..', '..bbbww', '.cccccp', '.cc.cc.', '.k...k.'], P));
+  SPRITES.sleep = outline(mk(['.......', '.......', '..hhh..', '.hhsss.', '.ccccc.', '.ccccc.', '.kk.kk.', '.......'], P));
+  const T1 = { w: '#6b4a2a', f: '#ffcf5c', o: '#ff8a2b' };
+  SPRITES.torch = outline(mk(['.o.', 'fof', '.f.', '.w.'], T1), '#241830');
+  SPRITES.torch2 = outline(mk(['.f.', 'ofo', '.o.', '.w.'], T1), '#241830');
+  const BD = { w: '#7a5230', W: '#5a3a20', l: '#c8c0b0' };
+  SPRITES.bed = outline(mk(['wllllllw', 'WllllllW', 'wWWWWWWw'], BD));
+  const CR = { m: '#8a8f96', M: '#5a5f66', o: '#c07a3a', w: '#4a3a28' };
+  SPRITES.cart = outline(mk(['m.....m', 'moo.oom', 'mooooom', 'MMMMMMM', '.w...w.'], CR));
+  const BR = { w: '#7a5230', W: '#4a3420', a: '#c98a3a', m: '#8a8f96' };
+  SPRITES.barrel = outline(mk(['.wwww.', 'waaaaw', 'wWWWWw', 'waaaaw', '.wwww.'], BR));
+  SPRITES.mug = outline(mk(['.....', 'wwww.', 'waaw#', 'waaw#', 'wwww.'], { w: '#c8c0b0', a: '#c98a3a', '#': '#c8c0b0' }));
+  const GT = { s: '#7a5230', S: '#4a3420', g: '#c9a227' };
+  SPRITES.gate = outline(mk(['.sssssssss.', 'sSSSSSSSSSs', 'sS.gggggg.S', 'sS.g....g.S', 'sS.g....g.S', 'sSSSSSSSSSs'], GT));
+}
+
+/* ═══════════════ Дварфы ═══════════════ */
+const N1 = ['ТОР', 'БАЛ', 'ДУР', 'ГИМ', 'ДВА', 'НА', 'БО', 'ОИН', 'ГЛО', 'ФРЕ', 'ТРА', 'КИ', 'ФИ', 'НО', 'ДО', 'ОР'];
+const N2 = ['ИН', 'ОР', 'УР', 'АР', 'ЛИ', 'ДАР', 'РИН', 'МУНД'];
+const SUR = ['КРЕПКОРУК', 'КАМНЕБОРОД', 'ЗЛАТОКОП', 'ЖЕЛЕЗНОЛОБ', 'ТИХОКИРК', 'РУДОЗНАТЕЦ', 'МЕДОВАР', 'СКАЛОЛОМ'];
+const TRAITS = [
+  { k: 'ТРУДЯГА',   speed: 1.15, fat: 1.4 },
+  { k: 'ПЬЯНИЦА',   moodRate: 2, drink: 2 },
+  { k: 'КРЕПЫШ',    fat: 0.5 },
+  { k: 'ЖАДНЫЙ',    ore: 1.2 },
+  { k: 'ВОРЧУН',    aura: -6 },
+  { k: 'ВЕСЕЛЬЧАК', aura: 6 },
+  { k: 'ВЕЗУЧИЙ',   gem: 1.15 },
+  { k: 'УПРЯМЫЙ',   stubborn: true },
+];
+let seedN = 1;
+const rnd = () => hash(seedN++ * 7919 + 13);
+function makeDwarf() {
+  const t = TRAITS[Math.floor(rnd() * TRAITS.length)];
+  return {
+    name: N1[Math.floor(rnd() * N1.length)] + N2[Math.floor(rnd() * N2.length)],
+    sur: SUR[Math.floor(rnd() * SUR.length)],
+    lvl: 1, xp: 0, trait: t,
+    mood: 70 + rnd() * 20, fat: rnd() * 20,
+    x: 0, y: 0, task: null, dir: 1,
+  };
+}
+const traitSpeed = d => (d.trait.speed || 1);
+const moodM = d => CFG.MOOD_LO + (CFG.MOOD_HI - CFG.MOOD_LO) * (d.mood / 100);
+const power = d => levelM(d.lvl) * moodM(d) * traitSpeed(d);
+
+/* ═══════════════ Состояние ═══════════════ */
+const st = {
+  yarus: 1, row: 0, blocks: [], types: [], prio: [],
+  stone: 0, gold: 0, ale: 0, gems: 0,
+  dwarves: [], beds: 1, pick: 0,
+  rooms: {},            // "ярус:слот" → {type:'mine'|'bed'|'brew'|'tavern'}
+  lastImm: 0, camY: 0, camFree: false, screen: null,
+};
+const BLOCK = 16, SURFACE_H = 44;
+let L = null, chips = [], floats = [], shake = 0, frame = 0, press = null, scrollY = 0;
+
+const roomList = () => Object.keys(st.rooms).map(k => ({ y: +k.split(':')[0], slot: +k.split(':')[1], type: st.rooms[k].type }));
+const roomsOf = t => roomList().filter(o => o.type === t);
+const bedsTotal = () => roomsOf('bed').length * 2;
+
+function worldTop(n) {
+  const a = Math.min(n - 1, 2), b = Math.max(0, Math.min(n - 1, 5) - 2), c = Math.max(0, n - 6);
+  return (a + b * 2 + c * 3) * BLOCK;
+}
+const yarusH = n => rowsOf(n) * BLOCK;
+const worldBottom = () => worldTop(st.yarus) + yarusH(st.yarus);
+const rowY = () => worldTop(st.yarus) + st.row * BLOCK;      // верх текущего ряда
+const colX = c => L.x0 + c * BLOCK + 4;
+
+/* ── ряд забоя ── */
+function newRow() {
+  const n = st.yarus;
+  st.blocks = []; st.types = []; st.prio = [];
+  for (let c = 0; c < CFG.BLOCK_W; c++) {
+    const t = blockType(n, st.row, c);
+    st.types.push(t);
+    st.blocks.push(blockHp(n) * BTYPE[t].hp);
+    st.prio.push(false);
+  }
+  st.dwarves.forEach(d => { if (d.task && d.task.kind === 'dig') d.task = null; });
+}
+
+/* ═══════════════ Правила выбора дела ═══════════════ */
+function freeBed() {
+  const used = st.dwarves.filter(d => d.task && d.task.kind === 'sleep' && d.task.bed).length;
+  return used < bedsTotal();
+}
+const tavern = () => roomsOf('tavern')[0];
+function roomNeedingHands() {
+  for (const r of roomList()) {
+    if (r.type !== 'mine' && r.type !== 'brew') continue;
+    const busy = st.dwarves.filter(d => d.task && d.task.kind === 'room' && d.task.y === r.y && d.task.slot === r.slot).length;
+    if (busy < 2) return r;
+  }
+  return null;
+}
+function freeBlock(prefer) {
+  // bv начинается с -Infinity: занятый блок даёт отрицательный счёт, и с нуля
+  // поиск «не находил» вообще ничего — колония замирала на первом же ярусе
+  let best = -1, bv = -Infinity;
+  for (let c = 0; c < CFG.BLOCK_W; c++) {
+    if (st.blocks[c] <= 0) continue;
+    const crowd = st.dwarves.filter(d => d.task && d.task.kind === 'dig' && d.task.col === c).length;
+    const score = (st.prio[c] ? 1000 : 0) - crowd * 100 + st.blocks[c] / 1000;
+    if (score > bv) { bv = score; best = c; }
+  }
+  if (prefer !== undefined && st.blocks[prefer] > 0 && best < 0) return prefer;
+  return best;
+}
+// пять правил, по порядку
+function chooseTask(d) {
+  if (d.fat >= CFG.FAT_SLEEP && roomsOf('bed').length) {
+    // ищем спальню, где ещё есть место
+    const r = roomsOf('bed').find(x => busyIn('sleep', x.y, x.slot) < 2) || roomsOf('bed')[0];
+    return { kind: 'sleep', bed: freeBed(), y: r.y, slot: r.slot, ofs: busyIn('sleep', r.y, r.slot) * 13 };
+  }
+  if (d.fat >= CFG.FAT_SLEEP) return { kind: 'sleep', bed: false, y: st.yarus - 1, slot: 0 };
+  if (d.mood <= CFG.MOOD_DRINK && st.ale >= CFG.ALE_PER_DRINK && tavern()) {
+    const t = tavern();
+    return { kind: 'drink', y: t.y, slot: t.slot, t: 0, ofs: busyIn('drink', t.y, t.slot) * 11 };
+  }
+  // забой не оголяем — правило самих дварфов, а не запрет на стройку
+  const diggers = st.dwarves.filter(x => x.task && x.task.kind === 'dig').length;
+  const prio = st.prio.findIndex((p, c) => p && st.blocks[c] > 0);
+  if (prio >= 0) return { kind: 'dig', col: prio };
+  if (diggers >= CFG.MIN_DIGGERS) {
+    const r = roomNeedingHands();
+    if (r) return { kind: 'room', y: r.y, slot: r.slot, rtype: r.type, ofs: busyIn('room', r.y, r.slot) * 12 };
+  }
+  const c = freeBlock();
+  return c >= 0 ? { kind: 'dig', col: c } : { kind: 'idle' };
+}
+// куда идти для задачи
+function taskSpot(t) {
+  if (t.kind === 'dig') return { x: colX(t.col), y: rowY() - 9 };
+  if (t.kind === 'idle') return { x: L.shaftX + 8, y: rowY() - 9 };
+  // сдвиг по числу уже работающих в этой комнате — иначе двое стоят друг в друге
+  const ofs = t.ofs || 0;
+  const hx = t.slot === 0 ? L.x0 + 6 + ofs : L.shaftX + L.shaft + L.hall - 17 - ofs;
+  return { x: hx, y: worldTop(t.y) + yarusH(t.y) - 11 };
+}
+const busyIn = (kind, y, slot) => st.dwarves.filter(d =>
+  d.task && d.task.kind === kind && d.task.y === y && d.task.slot === slot).length;
+
+/* ═══════════════ Раскладка ═══════════════ */
+const HUD_H = 26, BAR_H = 24, MAP_W = 7;
+function resize() {
+  const dpr = Math.min(window.devicePixelRatio || 1, 3);
+  const devW = Math.round(window.innerWidth * dpr), devH = Math.round(window.innerHeight * dpr);
+  const land = window.innerWidth > window.innerHeight * 1.15;
+  const wantW = land ? 300 : 124, wantH = land ? 172 : 250;
+  S = Math.max(1, Math.min(Math.floor(devW / wantW), Math.floor(devH / wantH)));
+  LW = Math.floor(devW / S); LH = Math.floor(devH / S);
+  buf.width = LW; buf.height = LH;
+  screenCv.width = LW * S; screenCv.height = LH * S;
+  screenCv.style.width = (LW * S / dpr) + 'px';
+  screenCv.style.height = (LH * S / dpr) + 'px';
+  sctx.imageSmoothingEnabled = false; ctx.imageSmoothingEnabled = false;
+  const colW = CFG.BLOCK_W * BLOCK, shaft = 24, hall = (colW - shaft) / 2;
+  const x0 = Math.floor((LW - MAP_W - colW) / 2);
+  L = { land, colW, shaft, hall, x0, shaftX: x0 + hall,
+        view: { y: HUD_H, h: LH - HUD_H - BAR_H },
+        map: { x: LW - MAP_W + 1, y: HUD_H + 2, w: MAP_W - 3, h: LH - HUD_H - BAR_H - 4 } };
+}
+window.addEventListener('resize', resize);
+const camTarget = () => Math.max(-SURFACE_H, worldBottom() - L.view.h + 10);
+const camMin = () => -SURFACE_H, camMax = () => Math.max(camMin(), worldBottom() - 24);
+
+/* ═══════════════ Ввод ═══════════════ */
+let hits = [], drag = null;
+const hitR = (r, p) => p.x >= r.x && p.y >= r.y && p.x < r.x + r.w && p.y < r.y + r.h;
+function toBuf(e) { const b = screenCv.getBoundingClientRect();
+  return { x: (e.clientX - b.left) / b.width * LW, y: (e.clientY - b.top) / b.height * LH }; }
+screenCv.addEventListener('pointerdown', e => {
+  e.preventDefault();
+  const p = toBuf(e);
+  drag = { y: p.y, cam: st.camY, scroll: scrollY, moved: 0 };
+  for (let i = hits.length - 1; i >= 0; i--) if (hitR(hits[i].r, p)) { hits[i].fn(p); return; }
+});
+screenCv.addEventListener('pointermove', e => {
+  if (!drag) return;
+  const d = drag.y - toBuf(e).y;
+  if (Math.abs(d) > 3) {
+    drag.moved = 1; press = null;
+    if (st.screen === 'dwarves') scrollY = Math.max(0, drag.scroll + d);
+    else { st.camFree = true; st.camY = Math.max(camMin(), Math.min(camMax(), Math.round(drag.cam + d))); }
+  }
+});
+const endDrag = () => { drag = null; press = null; };
+screenCv.addEventListener('pointerup', endDrag);
+screenCv.addEventListener('pointercancel', endDrag);
+screenCv.addEventListener('contextmenu', e => e.preventDefault());
+
+/* ═══════════════ Копание ═══════════════ */
+function damage(col, amount, sx, sy) {
+  if (st.blocks[col] === undefined || st.blocks[col] <= 0) return;
+  st.blocks[col] -= amount;
+  if (st.blocks[col] <= 0) {
+    st.blocks[col] = 0; st.prio[col] = false;
+    const t = st.types[col];
+    if (t === 'vein') { st.gold += goldRate(st.yarus) * 22; floats.push({ s: 'РУДА', x: sx, y: sy, t: 0, col: stratum(st.yarus).oreCol }); }
+    if (t === 'crystal') { st.gems += 2; floats.push({ s: '+2*', x: sx, y: sy, t: 0, col: '#7fd8e8' }); }
+    for (let i = 0; i < 8; i++) chips.push({ x: sx, y: sy, vx: (Math.random() - .5) * 60, vy: -25 - Math.random() * 40, t: 0 });
+    shake = Math.max(shake, 3);
+    st.dwarves.forEach(d => { if (d.task && d.task.kind === 'dig' && d.task.col === col) d.task = null; });
+    if (st.blocks.every(v => v <= 0)) rowDone();
+  }
+}
+function rowDone() {
+  st.row++;
+  if (st.row >= rowsOf(st.yarus)) {
+    const got = stoneOf(st.yarus);
+    st.stone += got;
+    floats.push({ s: '+' + fmt(got), x: L.shaftX + L.shaft / 2, y: worldTop(st.yarus) + 8, t: 0, col: '#e8dcc8' });
+    const before = stratum(st.yarus);
+    st.yarus++; st.row = 0;
+    shake = stratum(st.yarus) !== before ? 10 : 6;
+  }
+  newRow();
+}
+
+const roomCost = y => CFG.C_ROOM * E(y);
+const pickCost = () => CFG.C_PICK * E(CFG.PICK_YARUS[Math.min(st.pick + 1, CFG.PICK_YARUS.length - 1)]);
+const canPick = () => st.pick < pickTier(st.yarus);
+const ROOMS = [
+  { t: 'mine',   n: 'ШТРЕК',    k: 1.0 },
+  { t: 'bed',    n: 'СПАЛЬНЯ',  k: 1.0 },
+  { t: 'brew',   n: 'ПИВОВАРНЯ', k: 1.3 },
+  { t: 'tavern', n: 'ТАВЕРНА',  k: 1.8 },
+];
+let build = null;
+function tryBuild(type) {
+  if (!build) return;
+  const def = ROOMS.find(r => r.t === type), cost = roomCost(build.y) * def.k;
+  if (st.stone < cost) return;
+  if (type === 'mine' && !stratum(build.y).ore) return;
+  st.stone -= cost;
+  st.rooms[build.y + ':' + build.slot] = { type };
+  build = null;
+  st.dwarves.forEach(d => { if (d.task && (d.task.kind === 'dig' || d.task.kind === 'idle')) d.task = null; });
+}
+
+/* ═══════════════ Цикл ═══════════════ */
+let last = performance.now();
+function loop(now) {
+  const dt = Math.min(.1, (now - last) / 1000); last = now;
+  frame++; update(dt); draw(); requestAnimationFrame(loop);
+}
+function update(dt) {
+  const P = pickDmg(st.pick);
+  // долгий тап — приказ
+  if (press && performance.now() - press.t0 > 380) { st.prio[press.col] = !st.prio[press.col]; press = null; }
+
+  st.lastImm += dt;
+  if (st.lastImm >= CFG.IMMIGRATE && st.dwarves.length < bedsTotal() + 2 && st.dwarves.length < CFG.POP_CAP) {
+    st.lastImm = 0;
+    const d = makeDwarf();
+    const s = taskSpot({ kind: 'idle' }); d.x = s.x; d.y = s.y;
+    st.dwarves.push(d);
+  }
+
+  const aura = st.dwarves.reduce((a, d) => a + (d.trait.aura || 0), 0) / Math.max(1, st.dwarves.length);
+
+  for (const d of st.dwarves) {
+    // Потребности перебивают текущее дело. Без этой проверки дварф, у которого
+    // уже есть задача, не переоценивает себя никогда: усталость уезжала за 100,
+    // а он продолжал идти копать.
+    if (d.task && d.task.kind !== 'sleep' && d.fat >= CFG.FAT_SLEEP) d.task = null;
+    if (d.task && d.task.kind !== 'sleep' && d.task.kind !== 'drink'
+        && d.mood <= CFG.MOOD_DRINK && st.ale >= CFG.ALE_PER_DRINK && tavern()) d.task = null;
+    if (!d.task) d.task = chooseTask(d);
+
+    const t = d.task, spot = taskSpot(t), step = CFG.WALK * dt;
+    // Ходьба: сначала к стволу, потом по стволу, потом внутрь. Допуск прибытия
+    // равен шагу, иначе дварф перелетает цель и дрожит на месте вечно.
+    const atY = Math.abs(d.y - spot.y) <= step;
+    const tx = atY ? spot.x : L.shaftX + L.shaft / 2 - 3;
+    if (Math.abs(d.x - tx) > step) {
+      d.dir = Math.sign(tx - d.x); d.x += d.dir * step; d.moving = true;
+    } else {
+      d.x = tx;
+      if (!atY) { d.y += Math.sign(spot.y - d.y) * step; d.moving = true; }
+      else { d.y = spot.y; d.moving = false; }
+    }
+    if (d.moving) { d.fat = Math.min(100, d.fat + 100 / CFG.WORK_SPAN * dt * .3 * (d.trait.fat || 1)); continue; }
+
+    // на месте — делаем дело
+    if (t.kind === 'sleep') {
+      d.fat -= 100 / (t.bed ? CFG.SLEEP_BED : CFG.SLEEP_FLOOR) * dt;
+      if (d.fat <= 0) { d.fat = 0; d.task = null; }
+    } else if (t.kind === 'drink') {
+      t.t += dt;
+      d.mood = Math.min(100, d.mood + 100 / CFG.DRINK_SPAN * dt * (d.trait.drink || 1));
+      if (t.t >= 1 && st.ale >= CFG.ALE_PER_DRINK) { st.ale -= CFG.ALE_PER_DRINK; t.t = 0; }
+      if (d.mood >= 95 || st.ale <= 0) d.task = null;
+    } else if (t.kind === 'dig') {
+      if (st.blocks[t.col] <= 0) { d.task = null; continue; }
+      damage(t.col, CFG.DIGGER * P * power(d) * dt, colX(t.col) + 4, rowY() + 8);
+      wear(d, dt, aura);
+      if (!d.trait.stubborn && frame % 60 === 0) { const b = freeBlock(t.col); if (b >= 0 && st.prio[b] && !st.prio[t.col]) d.task = null; }
+    } else if (t.kind === 'room') {
+      if (t.rtype === 'mine') st.gold += goldRate(t.y) / 2 * power(d) * (d.trait.ore || 1) * dt;
+      else if (t.rtype === 'brew') st.ale += CFG.ALE_RATE * power(d) * dt;
+      wear(d, dt, aura);
+      if (frame % 120 === 0 && !st.rooms[t.y + ':' + t.slot]) d.task = null;
+    } else { wear(d, dt * .3, aura); if (frame % 90 === 0) d.task = null; }
+  }
+
+  if (!st.camFree) st.camY += (camTarget() - st.camY) * Math.min(1, dt * 6);
+  if (shake > 0) shake = Math.max(0, shake - dt * 26);
+  chips = chips.filter(c => { c.t += dt; c.x += c.vx * dt; c.y += c.vy * dt; c.vy += 150 * dt; return c.t < .9; });
+  floats = floats.filter(f => { f.t += dt; return f.t < 1.4; });
+}
+function wear(d, dt, aura) {
+  d.fat = Math.min(100, d.fat + 100 / CFG.WORK_SPAN * dt * (d.trait.fat || 1));
+  d.mood = Math.max(0, d.mood - 100 / CFG.MOOD_SPAN * dt * (d.trait.moodRate || 1) + aura * dt * .02);
+  d.xp += dt;
+  if (d.xp > 120 * d.lvl && d.lvl < CFG.LEVEL_MAX) { d.xp = 0; d.lvl++; }
+}
+
+/* ═══════════════ Рендер ═══════════════ */
+function draw() {
+  hits = [];
+  const cam = Math.round(st.camY) + (shake > 0 ? Math.round((Math.random() - .5) * shake) : 0);
+  const F2 = (frame >> 4) & 1, F4 = (frame >> 3) & 1;
+  R(0, 0, LW, LH, '#0d0a12');
+  ctx.save(); ctx.beginPath(); ctx.rect(0, L.view.y, LW, L.view.h); ctx.clip();
+
+  drawSurface(cam);
+  for (let n = 1; n <= st.yarus; n++) {
+    const top = worldTop(n), h = yarusH(n);
+    if (top + h - cam < -20 || top - cam > L.view.h) continue;
+    const sy = L.view.y + top - cam;
+    if (n < st.yarus) drawHall(n, sy, h, F2);
+    else drawFace(n, sy);
+  }
+  const bot = L.view.y + worldBottom() - cam;
+  if (bot < L.view.y + L.view.h) {
+    const S_ = stratum(st.yarus);
+    R(0, bot, LW, L.view.y + L.view.h - bot, S_.dark);
+    R(L.x0 - 4, bot, L.colW + 8, L.view.y + L.view.h - bot, S_.rock);
+  }
+  st.dwarves.forEach(d => drawDwarf(d, cam, F4));
+  chips.forEach(c => R(c.x, L.view.y + c.y - cam, 2, 2, '#efe4d0'));
+  floats.forEach(f => { if (f.t < 1.1 || (frame >> 2) % 2) textC(f.s, f.x, L.view.y + f.y - cam - f.t * 12, f.col); });
+  ctx.restore();
+
+  drawMinimap(); drawHUD(); drawBar();
+  if (build) drawBuildPanel();
+  if (st.screen === 'dwarves') drawDwarvesScreen();
+
+  sctx.clearRect(0, 0, screenCv.width, screenCv.height);
+  sctx.drawImage(buf, 0, 0, LW, LH, 0, 0, LW * S, LH * S);
+}
+
+function drawSurface(cam) {
+  const sy = L.view.y - SURFACE_H - cam;
+  if (sy > L.view.y + L.view.h || sy + SURFACE_H < L.view.y) return;
+  R(0, sy, LW, SURFACE_H, '#2a3a55');
+  for (let i = 0; i < 14; i++) R((i * 37) % LW, sy + 4 + (i * 13) % 20, 1, 1, '#4a5c7a');
+  R(0, sy + SURFACE_H - 10, LW, 10, '#3d5a2e');
+  R(0, sy + SURFACE_H - 10, LW, 2, '#5c8a42');
+  spr('gate', L.shaftX + L.shaft / 2 - SW('gate') / 2, sy + SURFACE_H - 10 - SH('gate') + 2);
+  textC('ВОРОТА', L.shaftX + L.shaft / 2, sy + 6, '#9ab0cc', null);
+}
+
+function drawHall(n, sy, h, F2) {
+  const S_ = stratum(n);
+  R(L.x0 - 4, sy, L.colW + 8, h, S_.rock);
+  R(L.shaftX, sy, L.shaft, h, '#1d1626');
+  for (let ry = sy + 1; ry < sy + h; ry += 5) R(L.shaftX + 3, ry, L.shaft - 6, 1, '#6b4a2a');
+  R(L.shaftX + 3, sy, 1, h, '#3a2d18'); R(L.shaftX + L.shaft - 4, sy, 1, h, '#3a2d18');
+  if (rowsOf(n) === 1) { R(L.x0 - 4, sy, L.colW + 8, 1, S_.dark); return; }
+
+  for (let slot = 0; slot < 2; slot++) {
+    const hx = slot === 0 ? L.x0 : L.shaftX + L.shaft;
+    R(hx, sy + 1, L.hall, h - 3, S_.hall);
+    R(hx, sy + h - 3, L.hall, 2, S_.dark);
+    R(hx, sy, L.hall, 1, S_.dark);
+    spr(F2 ? 'torch' : 'torch2', slot === 0 ? hx + L.hall - 5 : hx + 2, sy + 4);
+    const room = st.rooms[n + ':' + slot], floorY = sy + h - 3;
+    if (!room) {
+      const r = { x: hx + 6, y: sy + 5, w: L.hall - 13, h: h - 12 };
+      for (let i = 0; i < r.w; i += 4) { R(r.x + i, r.y, 2, 1, S_.dark); R(r.x + i, r.y + r.h, 2, 1, S_.dark); }
+      for (let i = 0; i < r.h; i += 4) { R(r.x, r.y + i, 1, 2, S_.dark); R(r.x + r.w, r.y + i, 1, 2, S_.dark); }
+      hits.push({ r: { x: hx, y: sy, w: L.hall, h }, fn: () => { build = { y: n, slot }; } });
+    } else if (room.type === 'bed') {
+      spr('bed', hx + 5, floorY - SH('bed'));
+      spr('bed', hx + 5, floorY - SH('bed') - 9);
+    } else if (room.type === 'brew') {
+      spr('barrel', hx + 5, floorY - SH('barrel'));
+      spr('barrel', hx + 14, floorY - SH('barrel'));
+      spr('barrel', hx + 9, floorY - SH('barrel') * 2 + 1);
+    } else if (room.type === 'tavern') {
+      spr('barrel', hx + L.hall - 12, floorY - SH('barrel'));
+      R(hx + 5, floorY - 7, 16, 2, '#7a5230'); R(hx + 7, floorY - 5, 2, 5, '#5a3a20'); R(hx + 17, floorY - 5, 2, 5, '#5a3a20');
+      spr('mug', hx + 8, floorY - 12);
+    } else {
+      spr('cart', hx + 3, floorY - SH('cart'));
+      for (let i = 0; i < 3; i++) R(hx + L.hall - 9 + (i % 2) * 4, floorY - 7 - i * 4, 3, 3, S_.oreCol);
+    }
+  }
+}
+
+function drawFace(n, sy) {
+  const S_ = stratum(n), rows = rowsOf(n);
+  R(L.x0 - 4, sy, L.colW + 8, rows * BLOCK, S_.rock);
+  if (st.row > 0) {
+    R(L.x0, sy, L.colW, st.row * BLOCK, '#1d1626');
+    for (let ry = sy + 1; ry < sy + st.row * BLOCK; ry += 5) R(L.shaftX + 3, ry, L.shaft - 6, 1, '#6b4a2a');
+  }
+  const ry = sy + st.row * BLOCK;
+  R(L.x0 - 4, ry - 1, L.colW + 8, 1, '#e8a33c');
+  for (let c = 0; c < CFG.BLOCK_W; c++) {
+    const bx = L.x0 + c * BLOCK, type = st.types[c] || 'rock';
+    const full = blockHp(n) * BTYPE[type].hp, left = st.blocks[c] === undefined ? full : st.blocks[c];
+    if (left <= 0) { R(bx, ry, BLOCK, BLOCK, '#1d1626'); continue; }
+    R(bx, ry, BLOCK, BLOCK, type === 'cave' ? S_.dark : S_.rock);
+    R(bx, ry, BLOCK, 1, S_.dark); R(bx, ry, 1, BLOCK, S_.dark);
+    if (type === 'vein') for (let i = 0; i < 5; i++)
+      R(bx + 2 + ((c * 5 + i * 7) % 12), ry + 2 + ((i * 5 + c) % 12), 2, 2, S_.oreCol);
+    if (type === 'crystal') { const cc = '#7fd8e8';
+      R(bx + 7, ry + 3, 2, 10, cc); R(bx + 5, ry + 6, 2, 6, cc); R(bx + 9, ry + 5, 2, 7, cc); R(bx + 6, ry + 5, 1, 1, '#dffaff'); }
+    if (type === 'water') { for (let i = 0; i < 4; i++) R(bx + 2, ry + 3 + i * 3, 12, 2, i % 2 ? '#2f6aa8' : '#3f86c8'); }
+    if (type === 'cave') { R(bx + 3, ry + 4, 10, 8, '#120d18'); }
+    const stage = Math.min(3, Math.floor((1 - left / full) * 4));
+    for (let i = 0; i < stage * 3; i++) {
+      const a = (c * 7 + i * 31) % 360 * Math.PI / 180;
+      let px = bx + 8, py = ry + 8;
+      for (let s2 = 0; s2 < 3 + i % 3; s2++) { px += Math.cos(a) * 1.5; py += Math.sin(a) * 1.5; R(px, py, 1, 1, S_.dark); }
+    }
+    if (st.prio[c]) { R(bx, ry, BLOCK, 1, '#ffd24a'); R(bx, ry + BLOCK - 1, BLOCK, 1, '#ffd24a');
+      R(bx, ry, 1, BLOCK, '#ffd24a'); R(bx + BLOCK - 1, ry, 1, BLOCK, '#ffd24a');
+      text('*', bx + 6, ry + 5, '#ffd24a', null); }
+    const scrY = L.view.y + worldTop(n) + st.row * BLOCK - Math.round(st.camY);
+    hits.push({ r: { x: bx, y: scrY, w: BLOCK, h: BLOCK }, fn: () => {
+      damage(c, pickDmg(st.pick), bx + 8, worldTop(n) + st.row * BLOCK + 8);
+      press = { col: c, t0: performance.now() };
+    } });
+  }
+  if (st.row + 1 < rows) {
+    const uy = ry + BLOCK, uh = (rows - st.row - 1) * BLOCK;
+    R(L.x0, uy, L.colW, uh, S_.dark);
+    for (let c = 1; c < CFG.BLOCK_W; c++) R(L.x0 + c * BLOCK, uy, 1, uh, '#00000033');
+    for (let r2 = 0; r2 < rows - st.row - 1; r2++) R(L.x0, uy + r2 * BLOCK, L.colW, 1, '#00000033');
+  }
+}
+
+function drawDwarf(d, cam, F4) {
+  const sy = L.view.y + Math.round(d.y) - cam;
+  if (sy < L.view.y - 12 || sy > L.view.y + L.view.h) return;
+  const x = Math.round(d.x);
+  if (d.task && d.task.kind === 'sleep' && !d.moving) {
+    spr('sleep', x, sy + 2);
+    if ((frame >> 5) % 2) text('Z', x + 8, sy - 3, '#9ec4e8', null);
+  } else if (d.task && d.task.kind === 'drink' && !d.moving) {
+    spr(F4 ? 'dwarf' : 'dwarf2', x, sy); spr('mug', x + 7, sy + 2);
+  } else if (d.task && d.task.kind === 'dig' && !d.moving) {
+    spr(F4 ? 'miner' : 'miner2', x, sy);
+  } else if (d.moving) {
+    spr(F4 ? 'dwarf' : 'dwarf2', x, sy);
+  } else {
+    spr(F4 ? 'miner' : 'miner2', x, sy);
+  }
+  if (d.mood <= CFG.MOOD_DRINK) R(x + 3, sy - 4, 3, 3, '#e05a5a');
+  else if (d.fat >= CFG.FAT_SLEEP) R(x + 3, sy - 4, 3, 3, '#e8c34c');
+}
+
+function drawMinimap() {
+  const m = L.map, total = worldBottom() + SURFACE_H;
+  R(m.x - 1, m.y - 1, m.w + 2, m.h + 2, '#1a1424');
+  const toMap = wy => m.y + Math.round((wy + SURFACE_H) / total * m.h);
+  R(m.x, m.y, m.w, 2, '#3d5a2e');
+  const COL = { mine: '#c07a3a', bed: '#9ec4e8', brew: '#c98a3a', tavern: '#e8a33c' };
+  roomList().forEach(o => R(m.x, toMap(worldTop(o.y)), m.w, 1, COL[o.type]));
+  R(m.x, toMap(worldBottom()) - 1, m.w, 2, '#e8a33c');
+  const v0 = toMap(st.camY), v1 = toMap(st.camY + L.view.h);
+  R(m.x - 1, v0, 1, Math.max(2, v1 - v0), '#f0e6d2');
+  R(m.x + m.w, v0, 1, Math.max(2, v1 - v0), '#f0e6d2');
+  hits.push({ r: { x: m.x - 2, y: m.y - 1, w: m.w + 4, h: m.h + 2 }, fn: p => {
+    st.camFree = true;
+    st.camY = Math.max(camMin(), Math.min(camMax(), Math.round((p.y - m.y) / m.h * total - SURFACE_H - L.view.h / 2)));
+  } });
+}
+
+function drawHUD() {
+  R(0, 0, LW, HUD_H, '#1a1424');
+  R(0, HUD_H - 1, LW, 1, '#0d0a12');
+  const S_ = stratum(st.yarus);
+  text((st.yarus * 4) + ' М', 4, 4, '#f0e6d2');
+  textR(S_.name, LW - 4, 4, S_.oreCol || '#9a8f7c', null);
+  const a = fmt(st.stone);
+  text(a, 4, 14, '#d8cfc0');
+  text(fmt(st.gold), 4 + textW(a) + 6, 14, '#e8c34c');
+  const pop = st.dwarves.length, beds = bedsTotal();
+  const warn = pop > beds || (st.ale <= 0 && roomsOf('tavern').length);
+  textR(pop + '/' + beds, LW - 4, 14, warn ? '#e05a5a' : '#9ec4e8');
+}
+
+function drawBar() {
+  const y = LH - BAR_H;
+  R(0, y, LW, BAR_H, '#1a1424');
+  R(0, y, LW, 1, '#0d0a12');
+  const back = st.camFree, backW = 20, dwW = 34;
+  const bw = LW - 12 - dwW - (back ? backW + 4 : 0);
+  const bx = 4;
+  const ok = canPick() && st.gold >= pickCost();
+  const nextY = CFG.PICK_YARUS[Math.min(st.pick + 1, CFG.PICK_YARUS.length - 1)];
+  R(bx, y + 4, bw, BAR_H - 8, ok ? '#3d6b3a' : '#2a2436');
+  R(bx, y + 4, bw, 1, ok ? '#5c9455' : '#3a3248');
+  // на узком баре подпись не влезала и обрезалась кнопкой дварфов — сокращаем
+  const full = canPick() ? 'КИРКА ' + (st.pick + 2) + '  ' + fmt(pickCost()) : 'КИРКА ' + (st.pick + 1) + ' — ЯРУС ' + nextY;
+  const short = canPick() ? 'К' + (st.pick + 2) + ' ' + fmt(pickCost()) : 'К' + (st.pick + 1) + ' ' + nextY + 'Я';
+  textC(textW(full) + 6 <= bw ? full : short, bx + bw / 2, y + 9, ok ? '#eaffea' : '#6b6280');
+  if (ok) hits.push({ r: { x: bx, y: y + 4, w: bw, h: BAR_H - 8 }, fn: () => { st.gold -= pickCost(); st.pick++; shake = 4; } });
+  let rx = bx + bw + 4;
+  R(rx, y + 4, dwW, BAR_H - 8, '#3a3358'); R(rx, y + 4, dwW, 1, '#5c528c');
+  textC(String(st.dwarves.length), rx + dwW / 2, y + 9, '#ded0ff');
+  hits.push({ r: { x: rx, y: y + 4, w: dwW, h: BAR_H - 8 }, fn: () => { st.screen = st.screen ? null : 'dwarves'; scrollY = 0; } });
+  if (back) {
+    rx += dwW + 4;
+    R(rx, y + 4, backW, BAR_H - 8, '#4a3a6b'); R(rx, y + 4, backW, 1, '#6b569c');
+    textC('↓', rx + backW / 2, y + 9, '#ded0ff');
+    hits.push({ r: { x: rx, y: y + 4, w: backW, h: BAR_H - 8 }, fn: () => { st.camFree = false; } });
+  }
+}
+
+function drawBuildPanel() {
+  const w = Math.min(108, LW - 8), h = 22 + ROOMS.length * 15;
+  const x = Math.floor((LW - w) / 2), y = Math.floor((LH - h) / 2);
+  hits.push({ r: { x: 0, y: 0, w: LW, h: LH }, fn: () => { build = null; } });
+  R(x - 1, y - 1, w + 2, h + 2, '#0d0a12'); R(x, y, w, h, '#241d33'); R(x, y, w, 1, '#3d3352');
+  textC('ЯРУС ' + build.y, x + w / 2, y + 4, '#c8bfe0', null);
+  ROOMS.forEach((def, i) => {
+    const cost = roomCost(build.y) * def.k;
+    const okB = st.stone >= cost && (def.t !== 'mine' || !!stratum(build.y).ore);
+    const by = y + 14 + i * 15;
+    R(x + 4, by, w - 8, 13, okB ? '#3d6b3a' : '#2a2436');
+    text(def.n, x + 8, by + 3, okB ? '#eaffea' : '#6b6280', null);
+    textR(fmt(cost), x + w - 8, by + 3, okB ? '#d8cfc0' : '#6b6280', null);
+    if (okB) hits.push({ r: { x: x + 4, y: by, w: w - 8, h: 13 }, fn: () => tryBuild(def.t) });
+  });
+}
+
+function drawDwarvesScreen() {
+  R(0, HUD_H, LW, LH - HUD_H - BAR_H, '#181322');
+  hits.push({ r: { x: 0, y: HUD_H, w: LW, h: LH - HUD_H - BAR_H }, fn: () => {} });
+  const CH = 26, top = HUD_H + 2;
+  const maxScroll = Math.max(0, st.dwarves.length * CH - (L.view.h - 4));
+  scrollY = Math.min(scrollY, maxScroll);
+  ctx.save(); ctx.beginPath(); ctx.rect(0, HUD_H, LW, LH - HUD_H - BAR_H); ctx.clip();
+  st.dwarves.forEach((d, i) => {
+    const cy = top + i * CH - Math.round(scrollY);
+    if (cy > LH - BAR_H || cy + CH < HUD_H) return;
+    const cw = LW - MAP_W - 2;
+    R(2, cy, cw, CH - 2, i % 2 ? '#1f1a2e' : '#241d33');
+    spr(d.moving ? 'dwarf' : 'miner', 4, cy + 5);
+    // Три строки, статус — в первой справа. Раньше он стоял в одной строке с чертой
+    // характера и налезал на неё у длинных («РАБОТАЕТ» на «КРЕПЫШ»).
+    const T2 = { dig: 'КОПАЕТ', room: 'В КОМНАТЕ', sleep: 'СПИТ', drink: 'ПЬЁТ', idle: 'БЕЗ ДЕЛА' };
+    text(d.name, 15, cy + 2, '#f0e6d2', null);
+    textR(d.moving ? 'ИДЁТ' : (T2[d.task ? d.task.kind : 'idle'] || ''), cw - 2, cy + 2, '#a99fc0', null);
+    text(d.sur, 15, cy + 10, '#8f86a8', null);
+    text(d.lvl + ' ' + d.trait.k, 15, cy + 18, '#c9a227', null);
+    const bw = 26, bx = cw - bw - 2;
+    R(bx, cy + 11, bw, 3, '#3a3248'); R(bx, cy + 11, Math.round(bw * d.mood / 100), 3, d.mood <= CFG.MOOD_DRINK ? '#e05a5a' : '#5cc46a');
+    R(bx, cy + 18, bw, 3, '#3a3248'); R(bx, cy + 18, Math.round(bw * d.fat / 100), 3, d.fat >= CFG.FAT_SLEEP ? '#e8c34c' : '#7a6f8c');
+    hits.push({ r: { x: 2, y: Math.max(HUD_H, cy), w: cw, h: CH - 2 }, fn: () => {
+      st.screen = null; st.camFree = true;
+      st.camY = Math.max(camMin(), Math.min(camMax(), Math.round(d.y - L.view.h / 2)));
+    } });
+  });
+  ctx.restore();
+  R(0, HUD_H, LW, 1, '#0d0a12');
+}
+
+/* ═══════════════ Старт ═══════════════ */
+buildSprites(); resize(); newRow();
+for (let i = 0; i < 2; i++) { const d = makeDwarf(); const s = taskSpot({ kind: 'idle' }); d.x = s.x + i * 10; d.y = s.y; st.dwarves.push(d); }
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

@@ -1,0 +1,5 @@
+{
+  "type": "module",
+  "private": true,
+  "//": "Только для node-инструментов (sim.mjs): без этого node читает economy.js как CommonJS. В сборку игры не идёт."
+}

@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Камера-стенд · Удачный Квартал</title>
+<!--
+  Это не игра, а линейка. Стенд отвечает на три вопроса до того, как написана
+  первая строчка геймплея:
+    1) какой наклон и поворот ортокамеры держит «макет на столе» из ART.md;
+    2) сколько процентов кадра занимает остров при разных размерах сетки и зуме
+       (правило Яндекса — геймплей >= 70%, п. 5.1.1.2);
+    3) тянет ли мобильный GPU тени на нужном числе объектов.
+  Дома и земля здесь — серые заглушки специально: стенд про камеру, не про стиль.
+-->
+<script type="importmap">
+{ "imports": { "three": "./vendor/three.module.min.js" } }
+</script>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%;overflow:hidden;background:#cfd6dd;font:13px/1.4 system-ui,sans-serif;color:#26313a}
+  canvas{display:block;position:fixed;inset:0}
+  #panel{position:fixed;background:rgba(255,255,255,.86);backdrop-filter:blur(6px);
+         border-radius:12px;padding:10px 12px;display:grid;gap:7px;box-shadow:0 4px 16px rgba(0,0,0,.12)}
+  /* портрет — панель снизу, альбом — колонкой справа: та же развилка, что будет в игре */
+  @media (orientation:portrait){ #panel{left:8px;right:8px;bottom:8px} }
+  @media (orientation:landscape){ #panel{top:8px;right:8px;width:250px} }
+  .row{display:grid;grid-template-columns:74px 1fr 42px;align-items:center;gap:8px}
+  .row b{font-weight:600}
+  input[type=range]{width:100%}
+  .val{text-align:right;font-variant-numeric:tabular-nums;opacity:.7}
+  .btns{display:flex;gap:6px;flex-wrap:wrap}
+  button{flex:1;min-height:34px;min-width:64px;border:0;border-radius:8px;background:#26313a;color:#fff;
+         font:inherit;font-weight:600;cursor:pointer}
+  button.ghost{background:#e2e7ec;color:#26313a}
+  #stats{font-variant-numeric:tabular-nums;display:grid;grid-template-columns:1fr 1fr;gap:2px 10px;
+         border-top:1px solid #d5dbe1;padding-top:7px}
+  #stats i{font-style:normal;opacity:.6}
+  .bad{color:#b03030;font-weight:700}
+  .good{color:#2c7a4b;font-weight:700}
+</style>
+</head>
+<body>
+<canvas id="scene"></canvas>
+
+<div id="panel">
+  <div class="row"><b>Наклон</b><input id="tilt" type="range" min="25" max="85" value="55"><span class="val" id="tilt-v">55°</span></div>
+  <div class="row"><b>Зум</b><input id="zoom" type="range" min="60" max="140" value="100"><span class="val" id="zoom-v">100%</span></div>
+  <div class="row"><b>Сетка</b><input id="grid" type="range" min="5" max="12" value="8"><span class="val" id="grid-v">8×8</span></div>
+  <div class="row"><b>Застройка</b><input id="fill" type="range" min="0" max="100" value="55"><span class="val" id="fill-v">55%</span></div>
+  <div class="btns">
+    <button id="rot">Повернуть 90°</button>
+    <button id="shadow" class="ghost">Тени: вкл</button>
+  </div>
+  <div id="stats">
+    <span><i>кадр занят</i> <b id="cov">—</b></span><span><i>fps</i> <b id="fps">—</b></span>
+    <span><i>треугольники</i> <b id="tri">—</b></span><span><i>draw calls</i> <b id="dc">—</b></span>
+    <span><i>вьюпорт</i> <b id="vp">—</b></span><span><i>ориентация</i> <b id="ori">—</b></span>
+  </div>
+</div>
+
+<!-- Стенд — ES-модуль с importmap: с диска (file://) он не запустится, браузер молча
+     отдаст пустой экран. Обычный скрипт ниже выполняется всегда и объясняет, что делать. -->
+<script>
+if (location.protocol === 'file:') {
+  document.getElementById('panel').remove();
+  document.body.insertAdjacentHTML('beforeend',
+    '<div style="position:fixed;inset:0;display:grid;place-content:center;gap:10px;text-align:center;' +
+    'padding:24px;font:15px/1.5 system-ui,sans-serif;color:#26313a;background:#cfd6dd">' +
+    '<b style="font-size:18px">Стенд открыт с диска</b>' +
+    '<div>three.js подключён как ES-модуль — по протоколу <code>file://</code> браузер его не грузит.</div>' +
+    '<div>Запустите сервер и откройте по http:<br>' +
+    '<code style="display:inline-block;margin-top:6px;padding:6px 10px;background:#fff;border-radius:6px">' +
+    'node serve.js 8783</code><br>' +
+    '<a href="http://localhost:8783/game9-city/camera-lab.html">localhost:8783/game9-city/camera-lab.html</a></div></div>');
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+
+const canvas = document.getElementById('scene');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFShadowMap;
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0xcfd6dd);
+scene.fog = new THREE.Fog(0xcfd6dd, 26, 46);
+
+// Свет по ART.md: один направленный источник с ЗАФИКСИРОВАННЫМ углом + холодный подсвет неба.
+const sun = new THREE.DirectionalLight(0xfff2df, 2.1);
+sun.position.set(-8, 11, 8);          // азимут ~135°, высота ~50°
+sun.castShadow = true;
+sun.shadow.mapSize.set(1024, 1024);
+const sc = sun.shadow.camera;
+sc.left = -14; sc.right = 14; sc.top = 14; sc.bottom = -14; sc.near = 1; sc.far = 40;
+scene.add(sun, new THREE.HemisphereLight(0xbcd4e6, 0x6b7a86, 0.85));
+
+const camera = new THREE.OrthographicCamera(-10, 10, 10, -10, 0.1, 100);
+const rig = new THREE.Group();          // rig вращается шагами по 90°, камера в нём неподвижна
+rig.add(camera);
+scene.add(rig);
+
+// ---------- содержимое: серые заглушки, стенд про камеру, не про стиль ----------
+const city = new THREE.Group();
+scene.add(city);
+const mat = new THREE.MeshLambertMaterial({ vertexColors: true });
+const box = new THREE.BoxGeometry(1, 1, 1);
+
+// детерминированный «рандом», чтобы кадр не прыгал при каждой пересборке
+let seed = 1;
+const rnd = () => (seed = (seed * 1664525 + 1013904223) % 4294967296) / 4294967296;
+
+function paint(geo, color) {
+  const g = geo.clone(), c = new THREE.Color(color), n = g.attributes.position.count;
+  const arr = new Float32Array(n * 3);
+  for (let i = 0; i < n; i++) { arr[i * 3] = c.r; arr[i * 3 + 1] = c.g; arr[i * 3 + 2] = c.b; }
+  g.setAttribute('color', new THREE.BufferAttribute(arr, 3));
+  return g;
+}
+
+let N = 8, fillPct = 55;
+function build() {
+  city.clear();
+  seed = 1;
+  const half = (N - 1) / 2;
+  for (let x = 0; x < N; x++) for (let z = 0; z < N; z++) {
+    const px = x - half, pz = z - half;
+    const ground = new THREE.Mesh(paint(box, rnd() > .5 ? 0x9fae94 : 0x97a78d), mat);
+    ground.scale.set(1, 0.4, 1); ground.position.set(px, -0.2, pz);
+    ground.receiveShadow = true; city.add(ground);
+    if (rnd() * 100 > fillPct) continue;
+    const h = 0.5 + rnd() * 1.5;
+    const b = new THREE.Mesh(paint(box, 0xd8d2c8), mat);
+    b.scale.set(0.72, h, 0.72); b.position.set(px, h / 2, pz);
+    b.castShadow = true; b.receiveShadow = true; city.add(b);
+    if (rnd() > .5) {                                   // крыша: проверяем силуэт сверху
+      const r = new THREE.Mesh(paint(new THREE.ConeGeometry(0.62, 0.5, 4), 0xb08b72), mat);
+      r.rotation.y = Math.PI / 4; r.position.set(px, h + 0.25, pz);
+      r.castShadow = true; city.add(r);
+    }
+  }
+}
+build();
+
+// вода по краю макета: даёт границу предмета, за ней — только туман
+const water = new THREE.Mesh(new THREE.PlaneGeometry(80, 80), new THREE.MeshLambertMaterial({ color: 0x86a9bd }));
+water.rotation.x = -Math.PI / 2; water.position.y = -0.42;
+scene.add(water);
+
+// ---------- камера: кадрируем так, чтобы остров упирался в края ----------
+let tilt = 55, rot = 0, zoom = 1;   // tilt — угол возвышения над горизонтом
+function place() {
+  const d = 30, t = THREE.MathUtils.degToRad(tilt);
+  camera.position.set(0, Math.sin(t) * d, Math.cos(t) * d);
+  camera.lookAt(0, 0, 0);
+  rig.rotation.y = THREE.MathUtils.degToRad(rot);
+  resize();
+}
+// Кадрирование — это и есть раскладка. Остров вписывается не в весь экран, а в свободную
+// от панели область: в альбомной она слева от колонки, в портретной — над нижней панелью.
+// Так процент заполнения кадра честный: он считается от всего экрана, включая UI.
+const camBox = new THREE.Box3(), cornerV = new THREE.Vector3();
+const panel = document.getElementById('panel');
+function fitCamera() {
+  // Вьюпорт может быть нулевым: панель браузера скрыта, вкладка ещё не показана.
+  // Без этой проверки wpp уходит в Infinity, матрица камеры становится NaN — и остаётся
+  // такой навсегда, даже когда окно появится. Именно так стенд «падал» в пустой экран.
+  const W = innerWidth || document.documentElement.clientWidth;
+  const H = innerHeight || document.documentElement.clientHeight;
+  if (W < 2 || H < 2) return;
+  renderer.setSize(W, H, false);
+  camera.updateMatrixWorld(true);
+
+  // габариты острова в системе координат камеры
+  camBox.makeEmpty();
+  city.traverse(o => {
+    if (!o.isMesh) return;
+    const b = new THREE.Box3().setFromObject(o);
+    for (let i = 0; i < 8; i++) {
+      cornerV.set(i & 1 ? b.max.x : b.min.x, i & 2 ? b.max.y : b.min.y, i & 4 ? b.max.z : b.min.z)
+             .applyMatrix4(camera.matrixWorldInverse);
+      camBox.expandByPoint(cornerV);
+    }
+  });
+  const iw = camBox.max.x - camBox.min.x, ih = camBox.max.y - camBox.min.y;
+  const cx = (camBox.max.x + camBox.min.x) / 2, cy = (camBox.max.y + camBox.min.y) / 2;
+
+  // свободный прямоугольник под игру
+  const p = panel.getBoundingClientRect();
+  const land = W > H;
+  const rectW = Math.max(80, land ? W - (W - p.left) - 8 : W);
+  const rectH = Math.max(80, land ? H : H - (H - p.top) - 8);
+
+  const wpp = Math.max(iw / rectW, ih / rectH) * 1.06 / zoom;   // мировых единиц на пиксель
+  const halfW = W * wpp / 2, halfH = H * wpp / 2;
+  const C  = cx - halfW * (2 * (rectW / 2) / W - 1);
+  const Cy = cy - halfH * (1 - 2 * (rectH / 2) / H);
+  camera.left = C - halfW; camera.right = C + halfW;
+  camera.top = Cy + halfH; camera.bottom = Cy - halfH;
+  camera.updateProjectionMatrix();
+
+  vpEl.textContent = `${W}×${H}`;
+  oriEl.textContent = land ? 'альбом' : 'портрет';
+}
+const resize = fitCamera;
+addEventListener('resize', resize);
+// Событие resize не приходит, если вкладка открылась уже нужного размера, а первый фит
+// прошёл на нулевом вьюпорте. ResizeObserver ловит и этот случай, и появление панели.
+new ResizeObserver(() => fitCamera()).observe(document.body);
+
+// ---------- замер «сколько процентов кадра занимает город» ----------
+const v = new THREE.Vector3(), bb = new THREE.Box3();
+function coverage() {
+  let minX = 1, maxX = -1, minY = 1, maxY = -1;
+  city.traverse(o => {
+    if (!o.isMesh) return;
+    bb.setFromObject(o);
+    for (let i = 0; i < 8; i++) {
+      v.set(i & 1 ? bb.max.x : bb.min.x, i & 2 ? bb.max.y : bb.min.y, i & 4 ? bb.max.z : bb.min.z)
+       .project(camera);
+      if (v.x < minX) minX = v.x; if (v.x > maxX) maxX = v.x;
+      if (v.y < minY) minY = v.y; if (v.y > maxY) maxY = v.y;
+    }
+  });
+  const w = Math.min(maxX, 1) - Math.max(minX, -1), h = Math.min(maxY, 1) - Math.max(minY, -1);
+  return Math.max(0, Math.round(w * h / 4 * 100));
+}
+
+// ---------- панель ----------
+const $ = id => document.getElementById(id);
+const vpEl = $('vp'), oriEl = $('ori'), covEl = $('cov'), fpsEl = $('fps'), triEl = $('tri'), dcEl = $('dc');
+$('tilt').oninput = e => { tilt = +e.target.value; $('tilt-v').textContent = tilt + '°'; place(); };
+$('zoom').oninput = e => { zoom = +e.target.value / 100; $('zoom-v').textContent = e.target.value + '%'; resize(); };
+$('grid').oninput = e => { N = +e.target.value; $('grid-v').textContent = `${N}×${N}`; build(); resize(); };
+$('fill').oninput = e => { fillPct = +e.target.value; $('fill-v').textContent = fillPct + '%'; build(); };
+$('rot').onclick = () => { rot = (rot + 90) % 360; place(); };
+$('shadow').onclick = e => {
+  renderer.shadowMap.enabled = !renderer.shadowMap.enabled;
+  e.target.textContent = 'Тени: ' + (renderer.shadowMap.enabled ? 'вкл' : 'выкл');
+  scene.traverse(o => { if (o.isMesh) o.material.needsUpdate = true; });
+};
+
+let last = performance.now(), frames = 0, acc = 0, lastW = 0, lastH = 0;
+function loop(t) {
+  const dt = t - last; last = t; acc += dt; frames++;
+  // Сторож размера прямо в цикле: и resize, и ResizeObserver доставляются только когда
+  // страница рисует кадры. Если вкладка стартовала свёрнутой, оба события проходят мимо,
+  // и без этой проверки стенд остаётся с канвасом 300×150 навсегда.
+  if (innerWidth !== lastW || innerHeight !== lastH) {
+    lastW = innerWidth; lastH = innerHeight;
+    fitCamera();
+  }
+  if (acc > 400) {
+    fpsEl.textContent = Math.round(frames * 1000 / acc);
+    const cov = coverage();
+    covEl.textContent = cov + '%';
+    covEl.className = cov >= 70 ? 'good' : 'bad';
+    triEl.textContent = renderer.info.render.triangles.toLocaleString('ru');
+    dcEl.textContent = renderer.info.render.calls;
+    frames = 0; acc = 0;
+  }
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+place();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

@@ -1,0 +1,2112 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Пиксельная Ферма</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { height: 100%; overflow: hidden; background: #4a8f41; }
+  body { user-select: none; -webkit-user-select: none; }
+  /* единственный элемент страницы: пиксельный буфер, выведенный целым множителем.
+     Интерфейс тоже внутри него — на странице нет ни одного системного шрифта. */
+  #game {
+    position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%);
+    touch-action: none; display: block;
+    image-rendering: pixelated; image-rendering: crisp-edges;
+  }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<!-- sdk.js: только для Яндекс Игр -->
+<script src="vendor/sfx.js"></script>
+<script>
+/* ═══════════════ Обёртка Yandex SDK (мок-режим локально) ═══════════════ */
+const YSDK = (() => {
+  let ysdk = null, player = null, readySent = false;
+  function fireReady() {
+    if (readySent) return; readySent = true;
+    try { ysdk && ysdk.features && ysdk.features.LoadingAPI && ysdk.features.LoadingAPI.ready(); } catch (e) {}
+  }
+  async function init() {
+    if (typeof YaGames === 'undefined') return;
+    try {
+      ysdk = await Promise.race([YaGames.init(), new Promise((_, rej) => setTimeout(() => rej(0), 8000))]);
+    } catch (e) { ysdk = null; }
+    if (ysdk) {
+      try { player = await Promise.race([ysdk.getPlayer(), new Promise(r => setTimeout(() => r(null), 3000))]); }
+      catch (e) { player = null; }
+    }
+  }
+  const unmute = () => Sound.setMuted(!!(state && state.muted));
+  return {
+    init,
+    get lang() { try { return ysdk ? ysdk.environment.i18n.lang : (navigator.language || 'ru').slice(0, 2); } catch (e) { return 'ru'; } },
+    gameReady: fireReady,
+    gameplayStart() { ysdk?.features?.GameplayAPI?.start(); },
+    gameplayStop() { ysdk?.features?.GameplayAPI?.stop(); },
+    showInterstitial(onClose) {
+      if (!ysdk) { onClose?.(); return; }
+      this.gameplayStop(); Sound.setMuted(true);
+      ysdk.adv.showFullscreenAdv({ callbacks: {
+        onClose: () => { unmute(); onClose?.(); },
+        onError: () => { unmute(); onClose?.(); },
+      }});
+    },
+    showRewarded(onReward, onClose) {
+      if (!ysdk) { onReward?.(); onClose?.(true); return; }
+      this.gameplayStop(); Sound.setMuted(true);
+      let ok = false;
+      ysdk.adv.showRewardedVideo({ callbacks: {
+        onRewarded: () => { ok = true; onReward?.(); },
+        onClose: () => { unmute(); onClose?.(ok); },
+        onError: () => { unmute(); onClose?.(false); },
+      }});
+    },
+    async saveData(obj) {
+      if (player) { try { await player.setData(obj); return; } catch (e) {} }
+      try { localStorage.setItem('farm_save', JSON.stringify(obj)); } catch (e) {}
+    },
+    async loadData() {
+      if (player) { try { const d = await player.getData(); if (d && Object.keys(d).length) return d; } catch (e) {} }
+      try { return JSON.parse(localStorage.getItem('farm_save')) || {}; } catch (e) { return {}; }
+    },
+  };
+})();
+
+/* ═══════════════ Локализация ═══════════════ */
+const I18N = {
+  ru: {
+    title: 'Пиксельная Ферма',
+    crops: ['Морковь', 'Пшеница', 'Картофель', 'Помидор', 'Кукуруза', 'Клубника', 'Баклажан', 'Тыква'],
+    animals: ['Курица', 'Кролик', 'Коза', 'Корова'],
+    products: ['Яйцо', 'Пух', 'Молоко', 'Сливки'],
+    seedTitle: 'Что посадить?', animalTitle: 'Купить животное', marketTitle: 'Рынок', shopTitle: 'Улучшения фермы',
+    lockLvl: n => 'Уровень ' + n,
+    sell: 'Продать всё', sellX2: 'Продать ×2', empty: 'Пусто — вырасти урожай',
+    level: 'Ур.', levelUp: 'Новый уровень!', unlocked: 'Открыто:',
+    offline: 'С возвращением', ripened: 'Созрело:', producedT: 'Готово:', ok: 'Отлично',
+    freeCoins: n => '+' + n + ' монет', maxed: 'Максимум',
+    dailyTitle: 'Бонус дня', dailyStreak: n => 'День подряд: ' + n, x2: '×2 за рекламу',
+    ordersTitle: 'Заказы', fulfil: 'Отдать', reroll: 'Смена', noOrders: 'Заказов пока нет',
+    upg: { plot: 'Грядки', pen: 'Загон', house: 'Дом' },
+    upgEffect: {
+      plot: p => 'Рост быстрее на ' + p + '%',
+      pen: p => 'Удой быстрее на ' + p + '%',
+      house: p => 'Цена выше на ' + p + '%',
+    },
+    tut: ['Тапни по грядке и посади морковь',
+          'Тапни ещё раз — полей, вырастет быстрее',
+          'Созрело! Тапни и собери урожай',
+          'Продай урожай — кнопка с корзиной внизу'],
+  },
+  en: {
+    title: 'Pixel Farm',
+    crops: ['Carrot', 'Wheat', 'Potato', 'Tomato', 'Corn', 'Strawberry', 'Eggplant', 'Pumpkin'],
+    animals: ['Chicken', 'Rabbit', 'Goat', 'Cow'],
+    products: ['Egg', 'Wool', 'Milk', 'Cream'],
+    seedTitle: 'What to plant?', animalTitle: 'Buy an animal', marketTitle: 'Market', shopTitle: 'Farm upgrades',
+    lockLvl: n => 'Level ' + n,
+    sell: 'Sell all', sellX2: 'Sell ×2', empty: 'Empty - grow some crops',
+    level: 'Lvl', levelUp: 'Level up!', unlocked: 'Unlocked:',
+    offline: 'Welcome back', ripened: 'Ripened:', producedT: 'Ready:', ok: 'Great',
+    freeCoins: n => '+' + n + ' coins', maxed: 'Maxed',
+    dailyTitle: 'Daily bonus', dailyStreak: n => 'Day streak: ' + n, x2: '×2 for an ad',
+    ordersTitle: 'Orders', fulfil: 'Deliver', reroll: 'Reroll', noOrders: 'No orders yet',
+    upg: { plot: 'Plots', pen: 'Pen', house: 'House' },
+    upgEffect: {
+      plot: p => 'Growth ' + p + '% faster',
+      pen: p => 'Yield ' + p + '% faster',
+      house: p => 'Prices ' + p + '% higher',
+    },
+    tut: ['Tap a plot and plant a carrot',
+          'Tap again to water it - grows faster',
+          'Ripe! Tap to harvest',
+          'Sell the harvest - basket button below'],
+  },
+};
+let T = I18N.ru;
+
+/* ═══════════════ Звук: shared/sfx.js (копия в vendor/) ═══════════════
+   Слоёный синтез с ревербом и генеративная музыка «farm» вместо одноосцилляторных бипов.
+   Если библиотека не подгрузилась (открыли файлом с диска) — глушим вызовы, игра не падает. */
+if (typeof SFX === 'undefined') window.SFX = new Proxy(
+  { music: { start() {}, stop() {}, set() {} }, amb: { start() {}, stop() {} } },
+  { get: (t, k) => t[k] || (() => {}) });
+const Sound = (() => {
+  let muted = false, musicOn = false;
+  const music = () => { if (!muted && !musicOn && !document.hidden) { SFX.music.start('farm', .35); musicOn = true; } };
+  return {
+    plant()     { SFX.dig({ v: .7 }); },
+    water()     { SFX.water({ v: .8 }); },
+    harvest()   { SFX.pick(); },
+    coins(k)    { SFX.coins({ n: Math.min(k, 6) }); },
+    feed()      { SFX.drop({ v: .7 }); setTimeout(() => SFX.cluck({ v: .6 }), 140); },
+    collect()   { SFX.pickup(); },
+    buy()       { SFX.bell({ v: .8 }); },
+    levelUp()   { SFX.levelup(); },
+    error()     { SFX.error(); },
+    open()      { SFX.open({ v: .6 }); },
+    close()     { SFX.close({ v: .6 }); },
+    tap()       { SFX.tap({ v: .35 }); },
+    setMuted(m) { muted = m; SFX.setMuted(m); if (m) musicOn = false; else music(); },
+    unlock()    { SFX.unlock(); music(); },
+  };
+})();
+
+/* ═══════════════ Баланс ═══════════════ */
+const MIN = 60e3;
+const HUD_H = 15, BAR_H = 20;
+// Цены выверены симуляцией (scratchpad/sim.js): доход растёт монотонно с 720 до 1100 монет/час,
+// XP держится ровно на 360/час у любой культуры — старшие грядки не штрафуют по прокачке.
+const CROPS = [ // спека: docs/superpowers/specs/2026-08-04-pixel-farm-design.md
+  { unlock: 1, seed: 5,   grow: 30e3,      sell: 9,    xp: 2   },
+  { unlock: 2, seed: 10,  grow: 90e3,      sell: 23,   xp: 6   },
+  { unlock: 3, seed: 20,  grow: 3 * MIN,   sell: 47,   xp: 12  },
+  { unlock: 4, seed: 40,  grow: 6 * MIN,   sell: 97,   xp: 24  },
+  { unlock: 5, seed: 80,  grow: 10 * MIN,  sell: 180,  xp: 40  },
+  { unlock: 6, seed: 150, grow: 20 * MIN,  sell: 365,  xp: 80  },
+  { unlock: 7, seed: 300, grow: 40 * MIN,  sell: 755,  xp: 160 },
+  { unlock: 8, seed: 600, grow: 90 * MIN,  sell: 1700, xp: 360 },
+];
+// Животные дают примерно в 1,5 раза больше грядки со своим кормом — иначе их незачем покупать.
+const ANIMALS = [
+  { unlock: 3, cost: 200,  feed: 1, time: 5 * MIN,  sell: 120,  xp: 30  }, // курица ← пшеница
+  { unlock: 5, cost: 500,  feed: 0, time: 8 * MIN,  sell: 155,  xp: 48  }, // кролик ← морковь
+  { unlock: 7, cost: 1500, feed: 4, time: 15 * MIN, sell: 550,  xp: 90  }, // коза ← кукуруза
+  { unlock: 9, cost: 4000, feed: 7, time: 30 * MIN, sell: 2550, xp: 180 }, // корова ← тыква
+];
+// улучшения фермы за монеты — ветка независима от уровней
+const UPG = {
+  plot:  { icon: 'iBed',   step: .10, prices: [1000, 5000, 10000, 50000] },
+  pen:   { icon: 'iPen',   step: .10, prices: [1000, 5000, 10000, 50000] },
+  house: { icon: 'iHouse', step: .10, prices: [1000, 5000, 10000, 50000] },
+};
+const MAX_PLOTS = 20, START_PLOTS = 6, ANIMAL_SLOTS = 4, ORDER_SLOTS = 3;
+const DAILY_MAX_STREAK = 7;          // дальше серия не растёт, но и не сгорает при заходе
+const ORDER_REWARD_MULT = 1.6;       // заказ выгоднее простой продажи — в этом его смысл
+const PLOT_PRICES = (() => { // цена 7-й..20-й грядки: 100 × 1.7^k, красиво округлено
+  const p = []; let v = 100;
+  for (let i = START_PLOTS; i < MAX_PLOTS; i++) { p[i] = v; v = Math.round(v * 1.7 / 10) * 10; }
+  return p;
+})();
+const WATER_CUT = 1 / 3; // полив бесплатный, но один раз на грядку: −треть остатка
+const xpNeed = lvl => Math.round(30 * Math.pow(1.55, lvl - 1));
+
+/* ═══════════════ Пиксельный конвейер ═══════════════
+   Всё рисуется в буфер 1:1 (одна единица = один пиксель) и выводится на экран
+   целым множителем S с отключённым сглаживанием. Дробных размеров и субпиксельных
+   позиций в игре нет — включая интерфейс: меню рисуются тем же буфером и тем же
+   битмап-шрифтом, что и мир.                                                      */
+const TILE = 16;
+const screenCv = document.getElementById('game');
+const sctx = screenCv.getContext('2d');
+const buf = document.createElement('canvas');
+const ctx = buf.getContext('2d');
+let S = 4, LW = 320, LH = 180;
+
+function mk(rows, pal) {
+  const h = rows.length, w = rows[0].length;
+  if (rows.some(r => r.length !== w)) console.error('bad sprite matrix', w, rows);
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  const x = c.getContext('2d');
+  rows.forEach((row, y) => { for (let i = 0; i < row.length; i++) { const col = pal[row[i]]; if (col) { x.fillStyle = col; x.fillRect(i, y, 1, 1); } } });
+  return c;
+}
+// тёмный контур по краю силуэта — главный приём «дорогого» пиксель-арта
+function outline(src, col = '#2b1d12') {
+  const w = src.width + 2, h = src.height + 2;
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  const x = c.getContext('2d');
+  x.drawImage(src, 1, 1);
+  const d = x.getImageData(0, 0, w, h), a = d.data;
+  const solid = (i, j) => i >= 0 && j >= 0 && i < w && j < h && a[(j * w + i) * 4 + 3] > 0;
+  x.fillStyle = col;
+  for (let j = 0; j < h; j++) for (let i = 0; i < w; i++)
+    if (a[(j * w + i) * 4 + 3] === 0 && (solid(i + 1, j) || solid(i - 1, j) || solid(i, j + 1) || solid(i, j - 1)))
+      x.fillRect(i, j, 1, 1);
+  return c;
+}
+
+const SPRITES = {};
+const SW = n => SPRITES[n].width, SH = n => SPRITES[n].height;
+function spr(name, x, y) { ctx.drawImage(SPRITES[name], Math.round(x), Math.round(y)); }
+
+/* ═══════════════ Битмап-шрифт 5×7: кириллица, латиница, цифры, знаки ═══════════════
+   Пропорциональная ширина считается автоматически — пустые колонки обрезаются.     */
+const GLYPHS = {
+  A: '.###.|#...#|#...#|#####|#...#|#...#|#...#',
+  B: '####.|#...#|#...#|####.|#...#|#...#|####.',
+  C: '.####|#....|#....|#....|#....|#....|.####',
+  D: '####.|#...#|#...#|#...#|#...#|#...#|####.',
+  E: '#####|#....|#....|####.|#....|#....|#####',
+  F: '#####|#....|#....|####.|#....|#....|#....',
+  G: '.####|#....|#....|#..##|#...#|#...#|.###.',
+  H: '#...#|#...#|#...#|#####|#...#|#...#|#...#',
+  I: '#####|..#..|..#..|..#..|..#..|..#..|#####',
+  J: '....#|....#|....#|....#|#...#|#...#|.###.',
+  K: '#...#|#..#.|#.#..|##...|#.#..|#..#.|#...#',
+  L: '#....|#....|#....|#....|#....|#....|#####',
+  M: '#...#|##.##|#.#.#|#.#.#|#...#|#...#|#...#',
+  N: '#...#|##..#|#.#.#|#.#.#|#..##|#...#|#...#',
+  O: '.###.|#...#|#...#|#...#|#...#|#...#|.###.',
+  P: '####.|#...#|#...#|####.|#....|#....|#....',
+  Q: '.###.|#...#|#...#|#...#|#.#.#|#..#.|.##.#',
+  R: '####.|#...#|#...#|####.|#.#..|#..#.|#...#',
+  S: '.####|#....|#....|.###.|....#|....#|####.',
+  T: '#####|..#..|..#..|..#..|..#..|..#..|..#..',
+  U: '#...#|#...#|#...#|#...#|#...#|#...#|.###.',
+  V: '#...#|#...#|#...#|#...#|#...#|.#.#.|..#..',
+  W: '#...#|#...#|#...#|#.#.#|#.#.#|##.##|#...#',
+  X: '#...#|#...#|.#.#.|..#..|.#.#.|#...#|#...#',
+  Y: '#...#|#...#|.#.#.|..#..|..#..|..#..|..#..',
+  Z: '#####|....#|...#.|..#..|.#...|#....|#####',
+  // кириллица, уникальные начертания (остальные — псевдонимы латинских)
+  'Б': '####.|#....|#....|####.|#...#|#...#|####.',
+  'Г': '#####|#....|#....|#....|#....|#....|#....',
+  'Д': '.####|.#..#|.#..#|.#..#|.#..#|#####|#...#',
+  'Ж': '#.#.#|#.#.#|#.#.#|#####|#.#.#|#.#.#|#.#.#',
+  'З': '####.|....#|....#|.###.|....#|....#|####.',
+  'И': '#...#|#...#|#..##|#.#.#|##..#|#...#|#...#',
+  'Й': '.###.|#...#|#..##|#.#.#|##..#|#...#|#...#',
+  'Л': '..###|.##.#|.#..#|.#..#|.#..#|.#..#|#...#',
+  'П': '#####|#...#|#...#|#...#|#...#|#...#|#...#',
+  'У': '#...#|#...#|#...#|.####|....#|#...#|.###.',
+  'Ф': '..#..|.###.|#.#.#|#.#.#|#.#.#|.###.|..#..',
+  'Ц': '#..#.|#..#.|#..#.|#..#.|#..#.|#####|....#',
+  'Ч': '#...#|#...#|#...#|.####|....#|....#|....#',
+  'Ш': '#.#.#|#.#.#|#.#.#|#.#.#|#.#.#|#.#.#|#####',
+  'Щ': '#.#.#|#.#.#|#.#.#|#.#.#|#.#.#|#####|....#',
+  'Ъ': '##...|.#...|.#...|.###.|.#..#|.#..#|.###.',
+  'Ы': '#...#|#...#|##..#|#.#.#|#.#.#|#.#.#|##..#',
+  'Ь': '#....|#....|#....|####.|#...#|#...#|####.',
+  'Э': '####.|....#|....#|.####|....#|....#|####.',
+  'Ю': '#.##.|#.#.#|#.#.#|###.#|#.#.#|#.#.#|#.##.',
+  'Я': '.####|#...#|#...#|.####|..#.#|.#..#|#...#',
+  '0': '.###.|#...#|#..##|#.#.#|##..#|#...#|.###.',
+  '1': '..#..|.##..|..#..|..#..|..#..|..#..|.###.',
+  '2': '.###.|#...#|....#|...#.|..#..|.#...|#####',
+  '3': '#####|...#.|..##.|....#|....#|#...#|.###.',
+  '4': '...#.|..##.|.#.#.|#..#.|#####|...#.|...#.',
+  '5': '#####|#....|####.|....#|....#|#...#|.###.',
+  '6': '..##.|.#...|#....|####.|#...#|#...#|.###.',
+  '7': '#####|....#|...#.|..#..|.#...|.#...|.#...',
+  '8': '.###.|#...#|#...#|.###.|#...#|#...#|.###.',
+  '9': '.###.|#...#|#...#|.####|....#|...#.|.##..',
+  '.': '.....|.....|.....|.....|.....|.##..|.##..',
+  ',': '.....|.....|.....|.....|.##..|.##..|.#...',
+  ':': '.....|.##..|.##..|.....|.##..|.##..|.....',
+  '!': '..#..|..#..|..#..|..#..|..#..|.....|..#..',
+  '?': '.###.|#...#|....#|...#.|..#..|.....|..#..',
+  '-': '.....|.....|.....|#####|.....|.....|.....',
+  '+': '.....|..#..|..#..|#####|..#..|..#..|.....',
+  '/': '....#|....#|...#.|..#..|.#...|#....|#....',
+  '(': '...#.|..#..|.#...|.#...|.#...|..#..|...#.',
+  ')': '.#...|..#..|...#.|...#.|...#.|..#..|.#...',
+  "'": '..#..|..#..|.....|.....|.....|.....|.....',
+  '"': '#.#..|#.#..|.....|.....|.....|.....|.....',
+  '%': '##..#|##.#.|..#..|.#...|#.##.|..##.|.....',
+  '×': '.....|#...#|.#.#.|..#..|.#.#.|#...#|.....', // знак умножения
+  '→': '.....|..#..|...#.|#####|...#.|..#..|.....', // стрелка
+};
+// латинские буквы, чьё начертание совпадает с кириллицей
+Object.assign(GLYPHS, {
+  'А': GLYPHS.A, 'В': GLYPHS.B, 'Е': GLYPHS.E, 'Ё': GLYPHS.E, 'К': GLYPHS.K, 'М': GLYPHS.M,
+  'Н': GLYPHS.H, 'О': GLYPHS.O, 'Р': GLYPHS.P, 'С': GLYPHS.C, 'Т': GLYPHS.T, 'Х': GLYPHS.X,
+});
+
+const FONT = {};   // символ → {cols: [битовые маски по колонкам], w}
+const FONT_H = 7, SPACE_W = 3, LETTER_SP = 1;
+function buildFont() {
+  for (const ch in GLYPHS) {
+    const rows = GLYPHS[ch].split('|');
+    let lo = 5, hi = -1;
+    for (let c = 0; c < 5; c++) for (let r = 0; r < FONT_H; r++)
+      if (rows[r][c] === '#') { if (c < lo) lo = c; if (c > hi) hi = c; }
+    if (hi < 0) { FONT[ch] = { rows: [], w: SPACE_W }; continue; }
+    FONT[ch] = { rows: rows.map(r => r.slice(lo, hi + 1)), w: hi - lo + 1 };
+  }
+  FONT[' '] = { rows: [], w: SPACE_W };
+}
+function textW(s) {
+  s = String(s).toUpperCase();
+  let w = 0;
+  for (const ch of s) { const g = FONT[ch] || FONT[' ']; w += g.w + LETTER_SP; }
+  return Math.max(0, w - LETTER_SP);
+}
+function paintText(s, x, y, col) {
+  ctx.fillStyle = col;
+  let cx = x;
+  for (const ch of String(s).toUpperCase()) {
+    const g = FONT[ch] || FONT[' '];
+    for (let r = 0; r < g.rows.length; r++) {
+      const row = g.rows[r];
+      for (let c = 0; c < row.length; c++) if (row[c] === '#') ctx.fillRect(cx + c, y + r, 1, 1);
+    }
+    cx += g.w + LETTER_SP;
+  }
+}
+// текст с пиксельной тенью в один пиксель — читается на любом фоне
+function text(s, x, y, col, shadow = '#2b1d12') {
+  x = Math.round(x); y = Math.round(y);
+  if (shadow) paintText(s, x + 1, y + 1, shadow);
+  paintText(s, x, y, col);
+}
+const textC = (s, cx, y, col, sh) => text(s, Math.round(cx - textW(s) / 2), y, col, sh);
+const textR = (s, rx, y, col, sh) => text(s, Math.round(rx - textW(s)), y, col, sh);
+// обрезает строку под доступную ширину — длинные названия не наезжают на цену
+function fitText(s, maxW) {
+  s = String(s);
+  if (textW(s) <= maxW) return s;
+  while (s.length > 1 && textW(s + '.') > maxW) s = s.slice(0, -1);
+  return s + '.';
+}
+function wrapText(s, maxW) {
+  const words = String(s).split(' '), lines = [];
+  let cur = '';
+  for (const wd of words) {
+    const t = cur ? cur + ' ' + wd : wd;
+    if (textW(t) > maxW && cur) { lines.push(cur); cur = wd; } else cur = t;
+  }
+  if (cur) lines.push(cur);
+  return lines;
+}
+
+/* ═══════════════ Спрайты ═══════════════
+   Масштабы согласованы между собой: грядка 16, животное 14–16, куст 14,
+   дерево 24–30, стог 22, дом от 20 до 44 — чтобы морковь не была со стог сена. */
+const GP = { a: '#57a04b', b: '#5ca551', c: '#519a46', w: '#f2f0e4', y: '#ffd24a' };
+const GRASS_COL = '#57a04b';
+
+function buildSprites() {
+  const S_ = SPRITES;
+
+  /* ── трава ── */
+  S_.grass0 = mk([
+    'aaaaaaaaaaaaaaaa', 'aaaaaaaabaaaaaaa', 'aaacaaaaaaaaaaaa', 'aaaaaaaaaaaaacaa',
+    'aaaaaaaaaaaaaaaa', 'abaaaaaaaacaaaaa', 'aaaaaaaaaaaaaaaa', 'aaaaaacaaaaaaaba',
+    'aaaaaaaaaaaaaaaa', 'aacaaaaaabaaaaaa', 'aaaaaaaaaaaaaaaa', 'aaaaaaaaaaaacaaa',
+    'aaaaaaaaaaaaaaaa', 'aaabaaaacaaaaaaa', 'aaaaaaaaaaaaaaaa', 'aaaaaaaaaaabaaaa',
+  ], GP);
+  S_.grass1 = mk([
+    'aaaaaaaaaaaaaaaa', 'aaaaaaaabaaaaaaa', 'aaawyaaaaaaaaaaa', 'aaacaaaaaaaaacaa',
+    'aaaaaaaaaaaaaaaa', 'abaaaaaaaacaaaaa', 'aaaaaaaaaaaaaaaa', 'aaaaaacaaaaaaaba',
+    'aaaaaaaaaaaaaaaa', 'aacaaaaaabaaywaa', 'aaaaaaaaaaaacaaa', 'aaaaaaaaaaaaaaaa',
+    'aaaaaaaaaaaaaaaa', 'aaabaaaacaaaaaaa', 'aaaaaaaaaaaaaaaa', 'aaaaaaaaaaabaaaa',
+  ], GP);
+  S_.grass2 = mk([
+    'aaaaaaaaaaaaaaaa', 'aaaaaaaabaaaaaaa', 'aaacaaaaaaaaaaaa', 'aaaaaaaaaaaaacaa',
+    'aaaaaaaaaaaaaaaa', 'abaaaabbbaaaaaaa', 'aaaaabbbbbaaaaaa', 'aaaaabbbbbaaaaba',
+    'aaaaaabbbaaaaaaa', 'aacaaaaaabaaaaaa', 'aaaaaaaaaaaaaaaa', 'aaaaaaaaaaaacaaa',
+    'aaaaaaaaaaaaaaaa', 'aaabaaaacaaaaaaa', 'aaaaaaaaaaaaaaaa', 'aaaaaaaaaaabaaaa',
+  ], GP);
+  S_.dirt = mk([
+    'ddddddedddddfddd', 'dddedddddddddddd', 'dfdddddddeeddddd', 'dddddfdddddddddd',
+    'ddddddddddddddfd', 'dedddddfdddddddd', 'dddddddddddedddd', 'ddfddddddddddddd',
+    'dddddedddddfdddd', 'dddddddddddddddd', 'dfddddddeddddddd', 'dddddddddddddfdd',
+    'ddddeddddddddddd', 'dddddddfdddddddd', 'dedddddddddeeddd', 'dddddfdddddddddd',
+  ], { d: '#7d5a33', e: '#654724', f: '#8e6a3f' });
+  // грунт грядки без рамки — рамку рисуем кодом, она зависит от ступени улучшения
+  S_.bed = mk([
+    'ssssssssssssssss', 'ssffssffssffssff', 'ssssssssssssssss', 'ssssssssssssssss',
+    'ssffssffssffssff', 'ssssssssssssssss', 'ssssssssssssssss', 'ssffssffssffssff',
+    'ssssssssssssssss', 'ssssssssssssssss', 'ssffssffssffssff', 'ssssssssssssssss',
+    'ssssssssssssssss', 'ssffssffssffssff', 'ssssssssssssssss', 'ssssssssssssssss',
+  ], { s: '#6e4a28', f: '#5a3b1e' });
+  S_.bedWet = mk([
+    'ssssssssssssssss', 'ssffssffssffssff', 'ssssssssssssssss', 'ssssssssssssssss',
+    'ssffssffssffssff', 'ssssssssssssssss', 'ssssssssssssssss', 'ssffssffssffssff',
+    'ssssssssssssssss', 'ssssssssssssssss', 'ssffssffssffssff', 'ssssssssssssssss',
+    'ssssssssssssssss', 'ssffssffssffssff', 'ssssssssssssssss', 'ssssssssssssssss',
+  ], { s: '#4a3116', f: '#3b2711' });
+
+  /* ── растения ── */
+  S_.sprout = mk([
+    '................', '................', '................', '................',
+    '................', '.......tt.......', '......ts........', '.....t.s.t......',
+    '......tsst......', '.......s........', '.......s........', '.......s........',
+    '................', '................', '................', '................',
+  ], { s: '#3f9440', t: '#5fbe5a' });
+  S_.bush = mk([
+    '................', '................', '................', '................',
+    '......qq.q......', '....qqqqqqq.....', '...qpqqrqqqq....', '..qqqqqqrqqq....',
+    '..qprqqqqqpq....', '..qqqqrqqqqq....', '...qpqqqqpq.....', '....qqqqqq......',
+    '......qq........', '................', '................', '................',
+  ], { p: '#37913a', q: '#46a848', r: '#5fbe5a' });
+  // культуры 12×12 — заметно мельче построек и деревьев
+  S_.crop0 = mk([ // морковь
+    '...g..g.....', '....ggg.....', '...ooooo....', '...ooloo....', '...ooooo....',
+    '....oolo....', '....oooo....', '.....oo.....', '.....oo.....', '......o.....',
+    '......o.....', '............',
+  ], { g: '#3e9b3e', o: '#ff7a2e', l: '#ffb066' });
+  S_.crop1 = mk([ // пшеница
+    '..w...w.....', '.www.www....', '..w...w.....', '.www.www....', '..w...w.....',
+    '.www.www....', '..s...s.....', '..s...s.....', '...s.s......', '....ss......',
+    '....s.......', '............',
+  ], { w: '#e8c545', s: '#b5901e' });
+  S_.crop2 = mk([ // картофель
+    '............', '...bbbb.....', '..bbdbbb....', '.bbbbbbdb...', '.bdbbbbbb...',
+    '.bbbbbdbb...', '.bbbbbbbb...', '..bbbdbb....', '...bbbb.....', '............',
+    '............', '............',
+  ], { b: '#c49a5e', d: '#9a744a' });
+  S_.crop3 = mk([ // помидор
+    '....gg......', '...g..g.....', '..rrggrr....', '.rrrrrrrr...', '.rlrrrrrr...',
+    'rllrrrrrrr..', 'rlrrrrrrrr..', 'rrrrrrrrrr..', '.rrrrrrrr...', '..rrrrrr....',
+    '............', '............',
+  ], { r: '#e8402e', l: '#ff8a70', g: '#3e9b3e' });
+  S_.crop4 = mk([ // кукуруза
+    '....yy......', '...gyyg.....', '..gyayag....', '..gyyyyg....', '.gyayayg....',
+    '.gyyyyyg....', '.gyayayg....', '..gyyyyg....', '..gyayag....', '...gyyg.....',
+    '....gg......', '............',
+  ], { y: '#f5d327', a: '#d9ab13', g: '#4a9c3f' });
+  S_.crop5 = mk([ // клубника
+    '...g.g......', '....gg......', '..rrrrrr....', '.rrryrrrr...', '.rrrrrryr...',
+    'ryrrrrrrrr..', '.rrryrrrr...', '.rrrrrrry...', '..ryrrrr....', '...rrrr.....',
+    '....rr......', '............',
+  ], { r: '#e63950', y: '#ffe066', g: '#3e9b3e' });
+  S_.crop6 = mk([ // баклажан
+    '.....gg.....', '....gg......', '....pgp.....', '...pppppp...', '..pppppppp..',
+    '..plpppppp..', '.pllpppppp..', '.plppppppp..', '..pppppppp..', '...pppppp...',
+    '....pppp....', '............',
+  ], { p: '#7b3fa0', l: '#a86ac8', g: '#3e9b3e' });
+  S_.crop7 = mk([ // тыква
+    '.....gg.....', '..oooooooo..', '.ooloolooo..', 'oolooloolo..', 'oolooloolo..',
+    'oolooloolo..', 'oolooloolo..', 'oolooloolo..', '.ooloolooo..', '..oooooooo..',
+    '............', '............',
+  ], { o: '#f28a1f', l: '#d4700e', g: '#3e7a2e' });
+
+  /* ── животные 14×14 ── */
+  S_.anim0 = mk([ // курица
+    '.....rr.......', '....rrr.......', '....wwww......', '...wwkww......', '..owwwww......',
+    '...wwwwww..w..', '....wwwwwwww..', '....wwwwwwww..', '....wswwwwsw..', '....wwwwwww...',
+    '.....wwwww....', '......wwww....', '......o..o....', '.....oo..oo...',
+  ], { w: '#f7f3e8', s: '#d9d0ba', k: '#222222', r: '#e8402e', o: '#f5a623' });
+  S_.anim1 = mk([ // кролик
+    '...h..h.......', '..hph.hph.....', '..hph.hph.....', '..hph.hph.....', '...hhhh.......',
+    '..hhhhhh......', '..hkhhhh......', '..hhhhhhhhh...', '...hhhhhhhhh..', '...hwwhhhhhw..',
+    '..hhwwhhhhhh..', '..hhhhhhhhhh..', '...hh...hh....', '...hh...hh....',
+  ], { h: '#b0b0bc', p: '#e8a0b0', k: '#222222', w: '#e8e8ee' });
+  S_.anim2 = mk([ // коза
+    '..g.....g.....', '.g.g...g.g....', '..ccccccc.....', '..ccccccc.....', '..ckcccc......',
+    '..ccccc.......', '...cc.........', '...bccccccccc.', '...ccccccccccc', '...ccccccccccc',
+    '...cccccccccc.', '....cc....cc..', '....cc....cc..', '....gg....gg..',
+  ], { c: '#ddd4c2', g: '#8a8578', k: '#222222', b: '#c2b89e' });
+  S_.anim3 = mk([ // корова
+    '..l.....l.....', '.ll.....ll....', '..wwwwwww.....', '..wkwwwww.....', '..wwwwbbw.....',
+    '..wppppww.....', '..wppppwwwww..', '...wwwbbwwwww.', '...wwwwwwbbww.', '...wbbwwwwwww.',
+    '...wwwwwwppw..', '....ww..wppw..', '....ww...ww...', '....ww...ww...',
+  ], { w: '#f5f2ea', b: '#33302c', p: '#e8a0b0', k: '#222222', l: '#d9cfb0' });
+
+  /* ── продукты 12×12 ── */
+  S_.prod0 = mk([ // яйцо
+    '....eee.....', '...eeeee....', '..eeleeee...', '..eleeeee...', '..eleeeee...',
+    '.eeleeeeee..', '.eeeeeeeee..', '.eeeeeeese..', '.eeeeeesse..', '..eeeesse...',
+    '...eeeee....', '....eee.....',
+  ], { e: '#f7f0dd', l: '#fffaf0', s: '#dccfb0' });
+  S_.prod1 = mk([ // пух
+    '............', '...ff.ff....', '..ffffffff..', '.ffflffffff.', '.flffffflff.',
+    'fffffflffff.', 'fflffffffff.', 'ffffflfffff.', '.fffffffff..', '.ffflfffff..',
+    '..ffffff....', '............',
+  ], { f: '#eceaf5', l: '#ffffff' });
+  S_.prod2 = mk([ // молоко
+    '...bbb......', '...bbb......', '..bwwwb.....', '..wwwww.....', '..wwwww.....',
+    '.wwwwwww....', '.wlwwwww....', '.wlwwwww....', '.wlwwwww....', '.wwwwwww....',
+    '.wwwwwww....', '..wwwww.....',
+  ], { w: '#f2f6fa', l: '#ffffff', b: '#7ab2d4' });
+  S_.prod3 = mk([ // сливки
+    '...bbb......', '...bbb......', '..bwwwb.....', '..wwwww.....', '..ccccc.....',
+    '.ccccccc....', '.clccccc....', '.clccccc....', '.clccccc....', '.ccccccc....',
+    '.ccccccc....', '..ccccc.....',
+  ], { c: '#f5dfa0', l: '#fcf0cc', w: '#f2f6fa', b: '#c48a2a' });
+
+  /* ── мини-иконки 8×8: пузыри над животными и строки списков ── */
+  const mini = (r, p) => mk(r, p);
+  S_.mp0 = mini(['........', '..eee...', '.eelee..', '.eleeee.', 'eeleeeee', 'eeeeeese', '.eeeese.', '..eeee..'],
+    { e: '#f7f0dd', l: '#fffaf0', s: '#dccfb0' });
+  S_.mp1 = mini(['........', '..f.f...', '.ffffff.', 'flffffff', 'ffflffff', 'fffffff.', '.ffffff.', '..ffff..'],
+    { f: '#eceaf5', l: '#ffffff' });
+  S_.mp2 = mini(['..bbb...', '..bwb...', '.wwwww..', '.wlwwww.', '.wlwwww.', '.wwwwww.', '.wwwwww.', '..wwww..'],
+    { w: '#f2f6fa', l: '#ffffff', b: '#7ab2d4' });
+  S_.mp3 = mini(['..bbb...', '..bwb...', '.wwwww..', '.ccccc..', '.clcccc.', '.clcccc.', '.cccccc.', '..cccc..'],
+    { c: '#f5dfa0', l: '#fcf0cc', w: '#f2f6fa', b: '#c48a2a' });
+  S_.mc0 = mini(['..g.g...', '..ggg...', '.ooooo..', '.ooloo..', '.ooooo..', '..ooo...', '...o....', '...o....'],
+    { g: '#3e9b3e', o: '#ff7a2e', l: '#ffb066' });
+  S_.mc1 = mini(['...ww...', '..wwww..', '.wwsww..', '..wwww..', '.wwsww..', '..wwww..', '...ss...', '...ss...'],
+    { w: '#e8c545', s: '#b5901e' });
+  S_.mc4 = mini(['...yy...', '..gyyg..', '.gyayag.', '.gyyyyg.', '.gyayag.', '.gyyyyg.', '..gyyg..', '...gg...'],
+    { y: '#f5d327', a: '#d9ab13', g: '#4a9c3f' });
+  S_.mc7 = mini(['...gg...', '..oooo..', '.oolooo.', 'oolooloo', 'oolooloo', '.oolooo.', '..oooo..', '........'],
+    { o: '#f28a1f', l: '#d4700e', g: '#3e7a2e' });
+
+  /* ── иконки интерфейса 9×9 ── */
+  S_.coin = mk([
+    '..ddddd..', '.dwwllld.', 'dwlllllld', 'dwllkllld', 'dwlkkklld',
+    'dwllkllld', 'dwlllllld', '.dllllld.', '..ddddd..',
+  ], { d: '#8a6a12', w: '#fff3b0', l: '#ffd54a', k: '#c9971d' });
+  S_.star = mk([
+    '....y....', '...yyy...', '...yyy...', 'yyyyyyyyy', '.yyyyyyy.',
+    '..yyyyy..', '..yyyyy..', '.yy...yy.', 'yy.....yy',
+  ], { y: '#ffd54a' });
+  S_.clk = mk([
+    '..kkkkk..', '.k.....k.', 'k...k...k', 'k...k...k', 'k...kkk.k',
+    'k.......k', '.k.....k.', '..kkkkk..', '.........',
+  ], { k: '#e8e2d0' });
+  S_.clkD = mk([   // тёмный циферблат — для светлых табличек интерфейса
+    '..kkkkk..', '.kwwwwwk.', 'kww.k.wwk', 'kw..k..wk', 'kw..kkk.k',
+    'kww...wwk', '.kwwwwwk.', '..kkkkk..', '.........',
+  ], { k: '#5a4632', w: '#c9ab74' });
+  S_.lock = mk([
+    '..ggggg..', '.gg...gg.', '.gg...gg.', 'hhhhhhhhh', 'hhhkkkhhh',
+    'hhhkkkhhh', 'hhhhkhhhh', 'hhhhhhhhh', '.........',
+  ], { g: '#8a8a92', h: '#b8b8c0', k: '#55555c' });
+  S_.plus = mk([
+    '...www...', '...www...', '...www...', 'wwwwwwwww', 'wwwwwwwww',
+    'wwwwwwwww', '...www...', '...www...', '...www...',
+  ], { w: '#fff6dd' });
+  S_.spkOn = mk([
+    '.....w...', '....ww.w.', '..wwww..w', '.wwwww.w.', '.wwwww.w.',
+    '..wwww..w', '....ww.w.', '.....w...', '.........',
+  ], { w: '#f2e0b4' });
+  S_.spkOff = mk([
+    '.....w...', '....ww...', '..wwww.r.', '.wwwww..r', '.wwwww.r.',
+    '..wwww..r', '....ww.r.', '.....w...', '.........',
+  ], { w: '#f2e0b4', r: '#e8604a' });
+  S_.bolt = mk(['...yy....', '..yy.....', '.yy......', 'yyyyy....', '..yy.....', '.yy......', 'yy.......', '.........', '.........'],
+    { y: '#ffd54a' });
+  S_.film = mk([
+    'kkkkkkkkk', 'kw.k.kw.k', 'kkkkkkkkk', 'k.......k', 'k.......k',
+    'kkkkkkkkk', 'kw.k.kw.k', 'kkkkkkkkk', '.........',
+  ], { k: '#3a3346', w: '#e8e2d0' });
+  S_.hammer = mk([ // магазин улучшений
+    '..kkkkk..', '.kkkkkkk.', 'kkkkkkkkk', '.kk.w.kk.', '....w....',
+    '....w....', '....w....', '....w....', '....w....',
+  ], { k: '#9aa0a8', w: '#a06a33' });
+  S_.iBed = mk([ // ветка «грядки»
+    '.........', 'lllllllll', 'dsssssssd', 'ds.ss.ssd', 'dsssssssd',
+    'ds.ss.ssd', 'dsssssssd', 'ddddddddd', '.........',
+  ], { l: '#a8703a', d: '#8a5a2e', s: '#6e4a28' });
+  S_.iPen = mk([ // ветка «загон»
+    '..ww.....', '.wwww..r.', 'wwkwww...', 'wwwwww...', '.wwwwwww.',
+    '.wwwwwww.', '..w...w..', '..o...o..', '.........',
+  ], { w: '#f7f3e8', k: '#222222', r: '#e8402e', o: '#f5a623' });
+  S_.iHouse = mk([ // ветка «дом»
+    '....#....', '...###...', '..#####..', '.#######.', '#########',
+    'wwwwwwwww', 'wwbwwdwww', 'wwbwwdwww', 'wwwwwdwww',
+  ], { '#': '#c04a3a', w: '#e8cfa0', b: '#8fd0ee', d: '#7a4a22' });
+  S_.scroll = mk([ // заказы
+    'ppppppppp', 'p.......p', 'p.kkkkk.p', 'p.......p', 'p.kkkkk.p',
+    'p.......p', 'p.kkk...p', 'p.......p', 'ppppppppp',
+  ], { p: '#f2e0b4', k: '#7a5c34' });
+  S_.close = mk([
+    'r.......r', 'rr.....rr', '.rr...rr.', '..rr.rr..', '...rrr...',
+    '..rr.rr..', '.rr...rr.', 'rr.....rr', 'r.......r',
+  ], { r: '#e8604a' });
+  S_.arrow = mk(['..yyy..', '..yyy..', '..yyy..', '..yyy..', 'yyyyyyy', '.yyyyy.', '..yyy..', '...y...'], { y: '#ffd54a' });
+  S_.basket = mk([
+    '.....llll.....', '....l....l....', '...l......l...', '..dddddddddd..',
+    '..dblblblbld..', '..dlblblblbd..', '..dblblblbld..', '..dlblblblbd..',
+    '...dddddddd...', '..............',
+  ], { b: '#c98d4e', d: '#a06a33', l: '#e0b070' });
+  S_.can = mk([ // лейка — отклик на полив
+    '.........tt...', '....tt..tttt..', '...t..t.tttt..', '...t...ttttt..', '..tt..tttttttt',
+    '.tt..ttttttttt', '.t..tttlttttt.', '.t..tttlttttt.', '..t.ttttttttt.', '....ttttttttt.',
+    '....ttttttttt.', '.....ttttttt..',
+  ], { t: '#4aa3c0', l: '#7ecbe0' });
+
+  /* ── дом фермера: пять ступеней, каждая заметно крупнее и наряднее ── */
+  S_.house0 = mk([ // хижина
+    '.........##.........', '........####........', '.......######.......', '......########......',
+    '.....##########.....', '....############....', '...##############...', '..################..',
+    '..eeeeeeeeeeeeeeee..', '..wwwwwwwwwwwwwwww..', '..wwbbwwwwwwwwwwww..', '..wwbbwwwwwdddwwww..',
+    '..wwwwwwwwwdddwwww..', '..wwwwwwwwwdddwwww..', '..wwwwwwwwwdddwwww..',
+    '..wwwwwwwwwdkdwwww..', '..wwwwwwwwwdddwwww..', '..gggggggggggggggg..',
+  ], { '#': '#a8453a', e: '#7a2f28', w: '#d9b98a', b: '#8fd0ee', d: '#7a4a22', k: '#ffd54a', g: '#6b5a3f' });
+  S_.house1 = mk([ // домик с трубой
+    '..............cc......', '..........#...cc......', '.........###..cc......', '........#####.cc......',
+    '.......#########......', '......###########.....', '.....#############....', '....###############...',
+    '...#################..', '..###################.', '..eeeeeeeeeeeeeeeeeee.', '..wwwwwwwwwwwwwwwwwww.',
+    '..wwbbbwwwwwwwwbbbwww.', '..wwbbbwwwdddwwbbbwww.', '..wwwwwwwwdddwwwwwwww.', '..wwwwwwwwdkdwwwwwwww.',
+    '..wwwwwwwwdddwwwwwwww.', '..wwwwwwwwdddwwwwwwww.', '..ggggggggggggggggggg.', '......................',
+  ], { '#': '#a8453a', c: '#8a8578', e: '#7a2f28', w: '#e8cfa0', b: '#8fd0ee', d: '#7a4a22', k: '#ffd54a', g: '#6b5a3f' });
+  S_.house2 = mk([ // дом с крыльцом
+    '................cc........', '............#...cc........', '..........#####.cc........', '.........#######..........',
+    '........#########.........', '.......###########........', '......#############.......', '.....###############......',
+    '....#################.....', '...###################....', '..#####################...', '.#######################..',
+    '.eeeeeeeeeeeeeeeeeeeeeee..', '.wwwwwwwwwwwwwwwwwwwwwww..', '.wwbbbwwwwwwwwwwwwbbbwww..', '.wwbbbwwwwdddddwwwbbbwww..',
+    '.wwwwwwwwwdddddwwwwwwwww..', '.wwwwwwwwwdkdddwwwwwwwww..', '.wwwwwwwwwdddddwwwwwwwww..', '.wwwwwwwwwdddddwwwwwwwww..',
+    '.ppppppppppppppppppppppp..', '.pppppppppppppppppppppppp.', 'gggggggggggggggggggggggggg', '..........................',
+  ], { '#': '#c04a3a', c: '#8a8578', e: '#7a2f28', w: '#f0dcb0', b: '#8fd0ee', d: '#7a4a22', k: '#ffd54a', p: '#a8763f', g: '#6b5a3f' });
+  S_.house3 = mk([ // два этажа
+    '...................cc.........', '..............#....cc.........', '............######.cc.........', '..........##########..........',
+    '.........############.........', '........##############........', '.......################.......', '......##################......',
+    '.....####################.....', '....######################....', '...########################...', '..##########################..',
+    '..eeeeeeeeeeeeeeeeeeeeeeeeee..', '..wwwwwwwwwwwwwwwwwwwwwwwwww..', '..wwbbbwwwwwbbbbwwwwwbbbwwww..', '..wwbbbwwwwwbbbbwwwwwbbbwwww..',
+    '..wwwwwwwwwwwwwwwwwwwwwwwwww..', '..vvvvvvvvvvvvvvvvvvvvvvvvvv..', '..wwwwwwwwwwwwwwwwwwwwwwwwww..', '..wwbbbwwwwwdddddwwwwbbbwwww..',
+    '..wwbbbwwwwwdddddwwwwbbbwwww..', '..wwwwwwwwwwdkdddwwwwwwwwwww..', '..wwwwwwwwwwdddddwwwwwwwwwww..', '..wwwwwwwwwwdddddwwwwwwwwwww..',
+    '..pppppppppppppppppppppppppp..', '.pppppppppppppppppppppppppppp.', 'gggggggggggggggggggggggggggggg', '..............................',
+  ], { '#': '#c04a3a', c: '#8a8578', e: '#7a2f28', w: '#f5e4bd', v: '#c9a877', b: '#8fd0ee', d: '#7a4a22', k: '#ffd54a', p: '#a8763f', g: '#6b5a3f' });
+  S_.house4 = mk([ // усадьба с башенкой
+    '.............ff...................', '.............ss...................', '............#####.....cc..........', '..........#########...cc..........',
+    '.........###########..cc..........', '........##############............', '.......################...........', '......##################..........',
+    '.....####################.........', '....######################........', '...########################.......', '..##########################......',
+    '.############################.....', '###############################...', 'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee..', 'wwwwwwwwwwwwwwwwwwwwwwwwwwwwwwww..',
+    'wwbbbwwwwbbbbwwwwbbbbwwwwbbbwwww..', 'wwbbbwwwwbbbbwwwwbbbbwwwwbbbwwww..', 'wwwwwwwwwwwwwwwwwwwwwwwwwwwwwwww..', 'vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv..',
+    'wwwwwwwwwwwwwwwwwwwwwwwwwwwwwwww..', 'wwbbbwwwwbbbbwwwdddddwwwwbbbwwww..', 'wwbbbwwwwbbbbwwwdddddwwwwbbbwwww..', 'wwwwwwwwwwwwwwwwdkdddwwwwwwwwwww..',
+    'wwwwwwwwwwwwwwwwdddddwwwwwwwwwww..', 'wwwwwwwwwwwwwwwwdddddwwwwwwwwwww..', 'pppppppppppppppppppppppppppppppp..', 'ppppppppppppppppppppppppppppppppp.',
+    'gggggggggggggggggggggggggggggggggg', '..................................', '..................................', '..................................',
+  ], { '#': '#d4553f', f: '#ffd54a', s: '#8a8578', c: '#8a8578', e: '#7a2f28', w: '#fbeecb', v: '#c9a877', b: '#8fd0ee', d: '#7a4a22', k: '#ffd54a', p: '#b8863f', g: '#6b5a3f' });
+
+  /* ── постройки и декор: размеры соотнесены с грядкой (16) ── */
+  S_.barn = mk([
+    '............qq............', '..........qqrrqq..........', '........qqrrrrrrqq........',
+    '......qqrrrrrrrrrrqq......', '....qqrrrrrrrrrrrrrrqq....', '..qqrrrrrrrrrrrrrrrrrrqq..',
+    'qqrrrrrrrrrrrrrrrrrrrrrrqq', 'eeeeeeeeeeeeeeeeeeeeeeeeee', '.twwwwwwwwwwwwwwwwwwwwwwt.',
+    '.twwtbbtwwwwwwwwtbbtwwwwt.', '.twwtbbtwwtttttwtbbtwwwwt.', '.twwwwwwwwtdxxdwwwwwwwwwt.',
+    '.twwwwwwwwtdxxdwwwwwwwwwt.', '.twwwwwwwwtdxxdwwwwwwwwwt.', '.twwwwwwwwtdxxdwwwwwwwwwt.',
+    '.twwwwwwwwtdxxdwwwwwwwwwt.', '.twwwwwwwwtdxxdwwwwwwwwwt.', '.vvvvvvvvvvdxxdvvvvvvvvvv.',
+  ], { q: '#6f7684', r: '#565b66', e: '#33373f', w: '#b5453a', v: '#8f3129', t: '#e8ddc8', d: '#6b4423', x: '#4a2f16', b: '#cfe8f5' });
+  S_.tree = mk([ // большое дерево 24×30
+    '........uuuuuuuu........', '......uuuvuuuuvuuu......', '....uuvvuuuuuuuuvuuu....', '...uuvuuuuutuuuuuuvuu...',
+    '..uuvuuuutuuuuuuuuuvuu..', '.uvvuuuuuuuuutuuuuuuuuu.', '.uuuuutuuuuuuuuuuutuuuu.', 'uuvuuuuuuuutuuuuuuuuuuuu',
+    'uuuuuuuutuuuuuuuuutuuuuu', 'uuuutuuuuuuuuuuuuuuuuuvu', 'uuuuuuuuuuutuuuuuuuuuuuu', 'uuvuuuuuuuuuuuuutuuuuuuu',
+    '.uuuuutuuuuuuuuuuuuuuuu.', '.uuuuuuuuuuutuuuuuuuuuu.', '..uuuuuuuuuuuuuuuuuuuu..', '...tuuuuuuuuuuuuuuuut...',
+    '....ttuuuuuuuuuuuutt....', '......tttuuuuuutttt.....', '.........ttttttt........', '..........wwxw..........',
+    '..........wwxw..........', '..........wwxw..........', '..........wwxw..........', '.........wwwxww.........',
+    '.........wwxxww.........', '........wwxxxxww........', '........wxxxxxxw........', '.......wwxxxxxxww.......',
+    '......nnnnnnnnnnnn......', '.......nnnnnnnnnn.......',
+  ], { t: '#2e7a33', u: '#3f9743', v: '#58b455', w: '#6b4423', x: '#4a2f16', n: '#4d8f42' });
+  S_.tree2 = mk([ // ель 20×28
+    '.........vv.........', '........vuuv........', '........uttu........', '.......vuuttv.......', '......uuttttu.......',
+    '.....vuuttttuv......', '.....utttttttu......', '....vuutttttuuv.....', '....uttttttttu......', '...vuuttttttuuv.....',
+    '...uttttttttttu.....', '..vuuttttttttuuv....', '..utttttttttttu.....', '.vuuttttttttttuuv...', '.uttttttttttttttu...',
+    'vuuttttttttttttuuv..', 'uttttttttttttttttu..', '.uuttttttttttttuu...', '..uutttttttttuu.....', '....uuutttuuu.......',
+    '.........wx.........', '.........wx.........', '.........wx.........', '........wwxw........', '........wwxw........',
+    '.......nnnnnn.......', '.......nnnnnn.......', '........nnnn........',
+  ], { t: '#2e7a33', u: '#3f9743', v: '#58b455', w: '#6b4423', x: '#4a2f16', n: '#4d8f42' });
+  S_.treeSm = mk([ // молодое деревце 14×18
+    '....uuuuuu....', '..uuvuuuuvuu..', '.uuvuuutuuuuu.', 'uuuuuutuuuuvuu', 'uuvuuuuuutuuuu',
+    'uuuuutuuuuuuuu', '.uuuuuuuutuuu.', '..uuuuuuuuuu..', '...tuuuuuut...', '.....tttt.....',
+    '......wx......', '......wx......', '......wx......', '.....wwxw.....', '.....wxxw.....',
+    '....nnnnnn....', '.....nnnn.....', '..............',
+  ], { t: '#2e7a33', u: '#3f9743', v: '#58b455', w: '#6b4423', x: '#4a2f16', n: '#4d8f42' });
+  S_.shrub = mk([
+    '...vv.vv....', '..vvuvvvu...', '.vuuuuuuvu..', 'vuuuuuuuuuu.', 'uuuuuuuuuuu.',
+    '.utuuuuutu..', '..uttuuutu..', '...tt.tt....',
+  ], { t: '#2e7a33', u: '#4aa84e', v: '#6bc464' });
+  S_.stone = mk([ // валун 16×11
+    '.....llllll.....', '...llgggggggl...', '.llggggggggggd..', 'lgggggdggggggdd.', 'lggggggggdggggd.',
+    'lgggdggggggggdd.', '.lggggggdgggdd..', '..dggggggggdd...', '...dddddddddd...', '................', '................',
+  ], { g: '#9aa0a8', d: '#787e86', l: '#c0c6cc' });
+  S_.stoneSm = mk([
+    '..llll..', '.lgggdl.', 'lggggddl', '.dggddd.', '..dddd..', '........',
+  ], { g: '#9aa0a8', d: '#787e86', l: '#c0c6cc' });
+  S_.stump = mk([
+    '..llllllll..', '.lwwwwwwwwl.', 'lwwwrrrrwwwl', 'lwrrwwwwrrwl', 'lwrwwrrwwrwl',
+    'lwrrwwwwrrwl', 'lwwwrrrrwwwl', '.lwwwwwwwwl.', '..dddddddd..', '..dddddddd..',
+  ], { l: '#a8703a', w: '#c49257', r: '#8a5a2e', d: '#6b4423' });
+  S_.hay = mk([ // стог 22×18 — заметно крупнее культур
+    '.......yyyyyy.......', '.....yyaayyaayy.....', '...yyaayyyyaayyyy...', '..yyyyaayyyyaayyyy..',
+    '.yaayyyyaayyyyaayyy.', '.yyyyaayyyyaayyyyay.', 'yaayyyyaayyyyaayyyyy', 'yyyyaayyyyaayyyyaayy',
+    'yaayyyyaayyyyaayyyyy', 'yyyyaayyyyaayyyyaayy', 'yaayyyyaayyyyaayyyyy', 'yyyyaayyyyaayyyyaayy',
+    '.yaayyyyaayyyyaayyy.', '.yyyyaayyyyaayyyyay.', '..yyaayyyyaayyyyay..', '...yyyyaayyyyaayy...',
+    '.....yyaayyyyay.....', '.......yyyyyy.......',
+  ], { y: '#e0bf5c', a: '#bd9a34' });
+  S_.well = mk([
+    '..qqqqqqqqqq..', '.qqqqqqqqqqqq.', 'qqqqqqqqqqqqqq', '....w....w....', '....w....w....',
+    '....w....w....', '.nnnnnnnnnnnn.', '.nmnnnnnnnnmn.', '.nnhhhhhhhhnn.', '.nnhbbbbbbhnn.',
+    '.nmhblbbbbhmn.', '.nnhbbbbbbhnn.', '.nnnnnnnnnnnn.', '..nnnnnnnnnn..',
+  ], { q: '#b5763a', w: '#6b4423', n: '#9aa0a8', m: '#787e86', h: '#2a2018', b: '#3f7fb5', l: '#6fb0dd' });
+  S_.crate = mk([
+    'nnnnnnnnnnnn', 'nwwwwwwwwwwn', 'nwxwwwwwwxwn', 'nwwxwwwwxwwn', 'nwwwxwwxwwwn',
+    'nwwwwxxwwwwn', 'nwwwxwwxwwwn', 'nwwxwwwwxwwn', 'nwxwwwwwwxwn', 'nwwwwwwwwwwn', 'nnnnnnnnnnnn', '............',
+  ], { n: '#4a2f16', w: '#a8703a', x: '#8a5a2e' });
+  S_.pond = mk([ // прудик 22×15
+    '......nnnnnnnnnn......', '....nnbbbbbbbbbbnn....', '..nnbbbbbbbbbbbbbbnn..', '.nnbbbbblbbbbbbbbbbnn.',
+    '.nbbbbbllbbbbbbbbbbbn.', 'nbbbbbbbbbbbbbbllbbbbn', 'nbbbbbbbbbbbbbbllbbbbn', 'nbbllbbbbbbbbbbbbbbbbn',
+    'nbbllbbbbbbbbbbbbbbbbn', '.nbbbbbbbbbbbllbbbbbn.', '.nnbbbbbbbbbbbbbbbbnn.', '..nnbbbbbbbbbbbbbbnn..',
+    '....nnbbbbbbbbbbnn....', '......nnnnnnnnnn......', '......................',
+  ], { b: '#4a90c8', l: '#8fc8e8', n: '#3a6f9c' });
+  S_.scarecrow = mk([
+    '.....hhhh.....', '....hwwwwh....', '....whkkhw....', '....whwwhw....', '....hwwwwh....',
+    '.....hhhh.....', '.......x......', 'ccccccxcccccc.', '.....xxxxx....', '....xxrrxxx...',
+    '....xxrrxxx...', '.....xxxxx....', '......xxx.....', '......xxx.....', '......xxx.....',
+    '......xxx.....', '.....xxxxx....', '..............',
+  ], { h: '#d9b96a', w: '#f0dcb0', k: '#33241a', x: '#a8703a', c: '#8a5a2e', r: '#c04a3a' });
+  S_.fence = mk([
+    '.l............l.', '.f............f.', 'ffffffffffffffff', 'hhhhhhhhhhhhhhhh',
+    '.f............f.', 'ffffffffffffffff', 'hhhhhhhhhhhhhhhh', '.f............f.',
+  ], { f: '#a06a33', h: '#6b4423', l: '#c48a4a' });
+  S_.trough = mk([ // кормушка для загона
+    'nnnnnnnnnnnn', 'nwwwwwwwwwwn', 'nwyywyywyywn', 'nwwwwwwwwwwn', 'nnnnnnnnnnnn', '.n........n.',
+  ], { n: '#4a2f16', w: '#8a5a2e', y: '#e0bf5c' });
+  S_.shelter = mk([ // навес для загона (высшая ступень)
+    '...............#..............', '.............#####............', '...........#########..........',
+    '.........#############........', '.......#################......', '.....#####################....',
+    '...#########################..', 'eeeeeeeeeeeeeeeeeeeeeeeeeeeeee', 'w............................w',
+    'w............................w', 'w............................w', 'w............................w',
+  ], { '#': '#b5453a', e: '#7a2f28', w: '#6b4423' });
+
+  /* ── цветы, бабочки, тени ── */
+  const FL = ['..pp....', '.pccp...', '.pccp...', '..pp....', '...s....', '.l.s....', '..ls....', '...s....'];
+  S_.flower0 = mk(FL, { p: '#f28ab0', c: '#ffd24a', s: '#3f9440', l: '#58b455' });
+  S_.flower1 = mk(FL, { p: '#f2f0e4', c: '#ffd24a', s: '#3f9440', l: '#58b455' });
+  S_.flower2 = mk(FL, { p: '#8ab0f2', c: '#f2f0e4', s: '#3f9440', l: '#58b455' });
+  const BA = ['oo....oo', 'ooo..ooo', 'oosbbsoo', '.oobboo.', '..o..o..'];
+  const BB = ['........', 'oo....oo', 'ooobbooo', '.osbbso.', '..o..o..'];
+  const BO = { o: '#f5a623', s: '#ffd24a', b: '#33241a' }, BL = { o: '#6aa8f2', s: '#b8d8ff', b: '#33241a' };
+  S_.bfly0a = mk(BA, BO); S_.bfly0b = mk(BB, BO);
+  S_.bfly1a = mk(BA, BL); S_.bfly1b = mk(BB, BL);
+  S_.shadow = mk(['..ssssss..', '.ssssssss.', '..ssssss..'], { s: 'rgba(30,50,22,.22)' });
+  S_.shadowL = mk([
+    '....ssssssss....', '..ssssssssssss..', '.ssssssssssssss.', '..ssssssssssss..', '....ssssssss....',
+  ], { s: 'rgba(30,50,22,.20)' });
+  // три разные тени облаков
+  S_.cshadow0 = mk([
+    '......cccccc......', '...cccccccccccccc.', '.cccccccccccccccc.', 'cccccccccccccccccc',
+    'cccccccccccccccccc', '.cccccccccccccccc.', '..cccccccccccccc..', '.....cccccccc.....',
+  ], { c: 'rgba(24,54,20,.13)' });
+  S_.cshadow1 = mk([
+    '.....ccccc........', '..cccccccccccc....', '.cccccccccccccccc.', 'cccccccccccccccccc',
+    '.cccccccccccccccc.', '...cccccccccccc...', '......cccccc......',
+  ], { c: 'rgba(24,54,20,.11)' });
+  S_.cshadow2 = mk([
+    '........cccccccc....', '.....cccccccccccccc.', '..cccccccccccccccccc', 'cccccccccccccccccccc',
+    'cccccccccccccccccc..', '..cccccccccccccc....', '.....cccccc.........',
+  ], { c: 'rgba(24,54,20,.15)' });
+
+  /* ── фермер: 12×16 содержимого, outline() добавит контур до 14×18 ──
+     Рост выведен из мира: ниже амбара (20) и пугала (20), чуть выше коровы (16).
+     Собирается из трёх блоков, чтобы кадры отличались только тем, что двигается. */
+  const FP = { H: '#e8b45c', h: '#c08a3a', b: '#7a4a22', K: '#e8a878', k: '#c07a4a',
+               S: '#8a84b0', s: '#6f6a99', T: '#6b4a2a', t: '#3a2a1c', d: '#2b1d12' };
+  const F_TOP = [                                    // шляпа шире плеч + лицо
+    '...HHHHHH...', '..HHHHHHHH..', '..bbbbbbbb..', 'HHHHHHHHHHHH', 'hhhhhhhhhhhh',
+    '...KKKKKK...', '...KdKKdK...', '...KKKdKK...', '...kKKKKk...',
+  ];
+  const F_BODY = [                                   // 0 — обычный, 1 — вдох: плечи выше
+    ['..SSSSSSSS..', '.KsSSSSSSsK.', '.KsSSSSSSsK.', '..tttttttt..'],
+    ['..SSSSSSSS..', '..SSSSSSSS..', '.KsSSSSSSsK.', '..tttttttt..'],
+  ];
+  const F_WORK = [                                   // рука вытянута вперёд-вниз: полив
+    '..SSSSSSSS..', '.KsSSSSSSsK.', '..sSSSSSSsKK', '..tttttttt..',
+  ];
+  const F_LEGS = [                                   // 0 — стоит, 1 — контакт, 2 — пронос
+    ['..TTT..TTT..', '..TTT..TTT..', '..ttt..ttt..'],
+    ['.TTT....TTT.', '.TTT....TTT.', '.tt......tt.'],
+    ['..TTTTTTTT..', '..TTT..TTT..', '..ttt..ttt..'],
+  ];
+  const mkFarmer = (body, legs) => mk(F_TOP.concat(body, F_LEGS[legs]), FP);
+  S_.farmI0 = mkFarmer(F_BODY[0], 0); S_.farmI1 = mkFarmer(F_BODY[1], 0);
+  S_.farmW0 = mkFarmer(F_BODY[0], 1); S_.farmW1 = mkFarmer(F_BODY[0], 2);
+  S_.farmWk = mkFarmer(F_WORK, 0);
+
+  const BK = { k: '#2b1d12' };
+  S_.bird0 = mk(['k...k', '.k.k.', '..k..'], BK);
+  S_.bird1 = mk(['.....', 'kk.kk', '..k..'], BK);
+
+  ['sprout', 'bush', 'crop0', 'crop1', 'crop2', 'crop3', 'crop4', 'crop5', 'crop6', 'crop7',
+   'anim0', 'anim1', 'anim2', 'anim3', 'prod0', 'prod1', 'prod2', 'prod3',
+   'mp0', 'mp1', 'mp2', 'mp3', 'mc0', 'mc1', 'mc4', 'mc7',
+   'coin', 'star', 'clk', 'lock', 'plus', 'basket', 'bolt', 'arrow', 'hammer', 'can',
+   'iBed', 'iPen', 'iHouse', 'scroll',   // clkD намеренно без контура — он и так тёмный
+   'house0', 'house1', 'house2', 'house3', 'house4', 'barn',
+   'tree', 'tree2', 'treeSm', 'shrub', 'stone', 'stoneSm', 'stump', 'hay', 'well', 'crate',
+   'pond', 'scarecrow', 'trough', 'shelter', 'flower0', 'flower1', 'flower2',
+   'bfly0a', 'bfly0b', 'bfly1a', 'bfly1b',
+   'farmI0', 'farmI1', 'farmW0', 'farmW1', 'farmWk'].forEach(n => SPRITES[n] = outline(SPRITES[n]));
+
+  /* тёплые окна для ночи: только пиксели стекла (#8fd0ee), рисуются поверх вечернего тона */
+  for (const nm of ['house0', 'house1', 'house2', 'house3', 'house4']) {
+    const src = SPRITES[nm], c = document.createElement('canvas'); c.width = src.width; c.height = src.height;
+    const x = c.getContext('2d'), d = src.getContext('2d').getImageData(0, 0, src.width, src.height).data;
+    x.fillStyle = '#ffd98a';
+    for (let i = 0; i < d.length; i += 4)
+      if (d[i] === 0x8f && d[i + 1] === 0xd0 && d[i + 2] === 0xee) x.fillRect((i / 4) % src.width, Math.floor(i / 4 / src.width), 1, 1);
+    SPRITES[nm + 'Win'] = c;
+  }
+}
+const miniFeed = ci => SPRITES['mc' + ci] ? 'mc' + ci : 'mc0';
+
+/* ═══════════════ Состояние ═══════════════ */
+let state = null;
+const now = () => Date.now();
+
+function newGame() {
+  return {
+    v: 3, coins: 20, level: 1, xp: 0,
+    plots: Array.from({ length: START_PLOTS }, () => ({ c: -1, at: 0, wet: 0 })),
+    animals: Array.from({ length: ANIMAL_SLOTS }, () => ({ id: -1, fedAt: 0 })),
+    inv: {},                       // 'c0'..'c7' культуры, 'p0'..'p3' продукты
+    up: { plot: 0, pen: 0, house: 0 },
+    orders: [], daily: { day: -1, streak: 0 },
+    tut: 0, muted: false, adsAt: 0, seenAt: now(),
+  };
+}
+// номер календарного дня по локальному времени игрока
+const dayIndex = t => Math.floor((t - new Date(t).getTimezoneOffset() * 60000) / 86400e3);
+// эффекты улучшений
+const growMs = c => Math.round(CROPS[c].grow * (1 - UPG.plot.step * state.up.plot));
+const prodMs = a => Math.round(ANIMALS[a].time * (1 - UPG.pen.step * state.up.pen));
+const sellCrop = i => Math.round(CROPS[i].sell * (1 + UPG.house.step * state.up.house));
+const sellProd = i => Math.round(ANIMALS[i].sell * (1 + UPG.house.step * state.up.house));
+
+const plotGrowing = (p, t) => p.c >= 0 && t - p.at < growMs(p.c);
+const plotReady   = (p, t) => p.c >= 0 && t - p.at >= growMs(p.c);
+const plotLeft    = (p, t) => Math.max(0, growMs(p.c) - (t - p.at));
+const animReady   = (a, t) => a.id >= 0 && a.fedAt > 0 && t - a.fedAt >= prodMs(a.id);
+const animBusy    = (a, t) => a.id >= 0 && a.fedAt > 0 && t - a.fedAt < prodMs(a.id);
+
+function offlineSummary() {
+  const t = now(), from = Math.max(state.seenAt, t - 24 * 3600e3);
+  if (t - state.seenAt < MIN) return null;
+  const ripe = {}, made = {};
+  for (const p of state.plots) if (p.c >= 0) {
+    const at = p.at + growMs(p.c);
+    if (at > from && at <= t) ripe[p.c] = (ripe[p.c] || 0) + 1;
+  }
+  for (const a of state.animals) if (a.id >= 0 && a.fedAt > 0) {
+    const at = a.fedAt + prodMs(a.id);
+    if (at > from && at <= t) made[a.id] = (made[a.id] || 0) + 1;
+  }
+  if (!Object.keys(ripe).length && !Object.keys(made).length) return null;
+  return { ripe, made };
+}
+
+let dirty = false, lastSaveAt = 0;
+function save() { dirty = true; }
+function flushSave() {
+  if (!dirty) return;
+  dirty = false; lastSaveAt = now();
+  state.seenAt = now();
+  YSDK.saveData(state);
+}
+setInterval(() => { if (dirty && now() - lastSaveAt > 5000) flushSave(); }, 1000);
+
+async function loadGame() {
+  const d = await YSDK.loadData();
+  if (d && d.v >= 1 && d.v <= 3 && Array.isArray(d.plots)) {
+    state = Object.assign(newGame(), d);
+    state.v = 3;
+    delete state.water;                                   // легаси: заряды лейки убраны
+    state.up = Object.assign({ plot: 0, pen: 0, house: 0 }, d.up);
+    state.daily = Object.assign({ day: -1, streak: 0 }, d.daily);
+    if (!Array.isArray(state.orders)) state.orders = [];
+  } else state = newGame();
+  Sound.setMuted(!!state.muted);
+}
+
+/* ═══════════════ Раскладка ═══════════════ */
+let L = {};
+function mulberry32(seed) {                               // детерминированные декорации
+  return () => {
+    seed |= 0; seed = seed + 0x6D2B79F5 | 0;
+    let t = Math.imul(seed ^ seed >>> 15, 1 | seed);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+const hitR = (a, b) => a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+
+function resize() {
+  const dpr = Math.min(window.devicePixelRatio || 1, 3);
+  const devW = Math.round(window.innerWidth * dpr), devH = Math.round(window.innerHeight * dpr);
+  const land = window.innerWidth > window.innerHeight * 1.15;
+  const maxCols = land ? 6 : 4, maxRows = Math.ceil(MAX_PLOTS / maxCols);
+
+  // масштаб считаем по максимальному размеру фермы — чтобы он не менялся по ходу игры
+  const wantW = maxCols * TILE + 40;
+  const wantH = HUD_H + 6 + 30 + 12 + maxRows * TILE + 10 + BAR_H + 6;
+  S = Math.max(1, Math.min(Math.floor(devW / wantW), Math.floor(devH / wantH)));
+  LW = Math.floor(devW / S); LH = Math.floor(devH / S);
+  buf.width = LW; buf.height = LH;
+  screenCv.width = LW * S; screenCv.height = LH * S;
+  screenCv.style.width = (LW * S / dpr) + 'px';
+  screenCv.style.height = (LH * S / dpr) + 'px';
+  sctx.imageSmoothingEnabled = false; ctx.imageSmoothingEnabled = false;
+
+  const penH = 26, penW = Math.min(LW - 8, ANIMAL_SLOTS * (TILE + 6) + 6);
+  const penX = Math.floor((LW - penW) / 2), penY = HUD_H + 8;
+
+  // поле растёт вместе с фермой: показываем купленные грядки и одну на покупку
+  const shown = Math.min(MAX_PLOTS, (state ? state.plots.length : START_PLOTS) + 1);
+  const cols = Math.max(2, Math.min(maxCols, Math.ceil(Math.sqrt(shown * (land ? 1.7 : 0.9)))));
+  const rows = Math.ceil(shown / cols);
+  const fw = cols * TILE, fh = rows * TILE;
+  const fx = Math.floor((LW - fw) / 2);
+  const top = penY + penH + 14, bot = LH - BAR_H - 8;
+  const fy = top + Math.max(0, Math.floor((bot - top - fh) / 2));
+
+  L = { land, cols, rows, fx, fy, fw, fh,
+        pen: { x: penX, y: penY, w: penW, h: penH },
+        plots: [], slots: [], decor: [], path: null,
+        snd: { x: LW - 15, y: 3, w: 12, h: 12 } };
+  for (let i = 0; i < MAX_PLOTS; i++)
+    L.plots.push({ x: fx + (i % cols) * TILE, y: fy + ((i / cols) | 0) * TILE, w: TILE, h: TILE });
+  const sw = TILE + 6;
+  for (let i = 0; i < ANIMAL_SLOTS; i++)
+    L.slots.push({ x: penX + Math.floor((penW - ANIMAL_SLOTS * sw) / 2) + i * sw, y: penY, w: sw, h: penH });
+
+  if (fy - (penY + penH) >= 10)
+    L.path = { x: fx + Math.floor(fw / 2) - 5, y: penY + penH - 2, w: 10, h: fy - (penY + penH) + 4 };
+
+  /* ── декорации ── */
+  const blocked = [
+    { x: fx - 4, y: fy - 8, w: fw + 8, h: fh + 16 },
+    { x: penX - 6, y: penY - 14, w: penW + 12, h: penH + 22 },
+    { x: 0, y: 0, w: LW, h: HUD_H + 4 },
+    { x: 0, y: LH - BAR_H - 4, w: LW, h: BAR_H + 4 },
+  ];
+  if (L.path) blocked.push(L.path);
+  const place = (name, x, y) => {
+    x = Math.round(x); y = Math.round(y);
+    const r = { x, y, w: SW(name), h: SH(name) };
+    if (x < 1 || y < HUD_H + 2 || r.x + r.w > LW - 1 || r.y + r.h > LH - BAR_H - 3) return false;
+    if (blocked.some(b => hitR(r, b))) return false;
+    L.decor.push({ n: name, x, y }); blocked.push({ x: x - 2, y: y - 2, w: r.w + 4, h: r.h + 4 });
+    return true;
+  };
+  // дом фермера — главный объект двора, ступень задаёт спрайт
+  const hs = 'house' + state.up.house;
+  place(hs, penX - SW(hs) - 10, penY + penH - SH(hs) + 6) ||
+    place(hs, penX + penW + 10, penY + penH - SH(hs) + 6) ||
+    place(hs, 3, LH - BAR_H - SH(hs) - 4) ||
+    place(hs, LW - SW(hs) - 3, LH - BAR_H - SH(hs) - 4);
+  place('barn', penX + penW + 10, penY + penH - SH('barn') + 6) ||
+    place('barn', penX - SW('barn') - 10, penY + penH - SH('barn') + 6) ||
+    place('barn', LW - SW('barn') - 3, LH - BAR_H - SH('barn') - 4);
+  place('well', penX + penW + 8, penY - 4) || place('well', penX - SW('well') - 8, penY - 4);
+  place('hay', fx + fw + 8, fy + fh - SH('hay')) || place('hay', fx - SW('hay') - 8, fy + fh - SH('hay'));
+  place('scarecrow', fx + fw + 6, fy - 6) || place('scarecrow', fx - SW('scarecrow') - 6, fy - 6);
+  place('pond', 4, LH - BAR_H - SH('pond') - 6) || place('pond', LW - SW('pond') - 4, LH - BAR_H - SH('pond') - 6);
+  place('crate', fx - SW('crate') - 6, fy + 2) || place('crate', fx + fw + 6, fy + 2);
+
+  // зелень по опушке: чем ближе к центру двора, тем реже
+  const rnd = mulberry32(0x5EED);
+  const cxm = LW / 2, cym = (HUD_H + LH - BAR_H) / 2;
+  const FILL = ['tree', 'tree2', 'tree', 'treeSm', 'treeSm', 'shrub', 'shrub', 'stump', 'stone'];
+  for (let gy = HUD_H + 2; gy < LH - BAR_H - 10; gy += 13)
+    for (let gx = 1; gx < LW - 8; gx += 13) {
+      const x = gx + (rnd() - .5) * 8, y = gy + (rnd() - .5) * 7;
+      const edge = Math.min(1, Math.max(Math.abs(x - cxm) / cxm, Math.abs(y - cym) / Math.max(1, cym - HUD_H)));
+      const r = rnd(), dense = .16 + .5 * edge * edge;   // немного зелени и в середине двора
+      if (r < dense) place(FILL[rnd() * FILL.length | 0], x, y);
+      else if (r < dense + .14) place('flower' + (rnd() * 3 | 0), x, y);
+      else if (r < dense + .17) place('stoneSm', x, y);
+    }
+  const hEnt = L.decor.find(d => d.n.startsWith('house'));      // куда фермер уходит ночевать
+  L.home = hEnt ? { x: hEnt.x, y: hEnt.y, w: SW(hEnt.n), h: SH(hEnt.n) } : null;
+  L.decor.sort((a, b) => (a.y + SH(a.n)) - (b.y + SH(b.n)));   // порядок по глубине
+  farmerInit();
+  buildVignette();
+}
+window.addEventListener('resize', resize);
+
+/* ═══════════════ Эффекты ═══════════════ */
+let floats = [], drops = [], sparks = [], flys = [], pops = [];
+function addFloat(kind, val, x, y, col) { floats.push({ kind, val, x: Math.round(x), y: Math.round(y), t: 0, col }); }
+function addDrops(x, y) {
+  for (let i = 0; i < 9; i++) drops.push({ x: Math.round(x + rndi(-7, 7)), y: Math.round(y + rndi(-4, 3)), v: 20 + rndi(0, 26), t: 0 });
+}
+function addSparks(x, y) {
+  for (let i = 0; i < 9; i++) {
+    const a = Math.random() * Math.PI * 2, sp = 14 + Math.random() * 34;
+    sparks.push({ x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp - 18, t: 0, life: .35 + Math.random() * .25 });
+  }
+}
+function addFly(name, x, y) { flys.push({ n: name, sx: x, sy: y, t: 0 }); }
+function addPop(name, x, y) { pops.push({ n: name, x: Math.round(x), y: Math.round(y), t: 0 }); }
+const rndi = (a, b) => a + Math.floor(Math.random() * (b - a + 1));
+const SPARK_RAMP = ['#fff6dd', '#ffd54a', '#e08a1c'];
+
+/* ═══════════════ Общие рисовалки ═══════════════ */
+function groundPatch(x, y, w, h, seed) {   // вытоптанная земля с рваной кромкой
+  ctx.save(); ctx.beginPath(); ctx.rect(x, y, w, h); ctx.clip();
+  for (let py = y; py < y + h; py += TILE) for (let px = x; px < x + w; px += TILE) spr('dirt', px, py);
+  ctx.restore();
+  const r = mulberry32(seed);
+  ctx.fillStyle = GRASS_COL;
+  for (let i = 0; i < w; i++) {
+    ctx.fillRect(x + i, y, 1, 1 + (r() * 2 | 0));
+    const b = 1 + (r() * 2 | 0); ctx.fillRect(x + i, y + h - b, 1, b);
+  }
+  for (let j = 0; j < h; j++) {
+    ctx.fillRect(x, y + j, 1 + (r() * 2 | 0), 1);
+    const e = 1 + (r() * 2 | 0); ctx.fillRect(x + w - e, y + j, e, 1);
+  }
+}
+function panel(x, y, w, h) {               // деревянная плашка HUD
+  ctx.fillStyle = '#2b1d12'; ctx.fillRect(x, y, w, h);
+  ctx.fillStyle = '#7a4a22'; ctx.fillRect(x + 1, y + 1, w - 2, h - 2);
+  ctx.fillStyle = '#96602e'; ctx.fillRect(x + 1, y + 1, w - 2, 1);
+  ctx.fillStyle = '#563518'; ctx.fillRect(x + 1, y + h - 2, w - 2, 1);
+}
+function meter(x, y, w, p, col) {
+  p = Math.max(0, Math.min(1, p));
+  ctx.fillStyle = '#2b1d12'; ctx.fillRect(x, y, w, 3);
+  ctx.fillStyle = '#9a8a70'; ctx.fillRect(x + 1, y + 1, w - 2, 1);
+  const fill = Math.round((w - 2) * p);
+  if (fill > 0) { ctx.fillStyle = col; ctx.fillRect(x + 1, y + 1, fill, 1); }
+}
+function iconNum(icon, str, x, y, col, shadow) {
+  spr(icon, x, y);
+  text(str, x + SW(icon) + 2, y + Math.floor((SH(icon) - FONT_H) / 2), col,
+       shadow === undefined ? '#2b1d12' : shadow);
+}
+const iconNumW = (icon, str) => SW(icon) + 2 + textW(str);
+function fmtN(n) { return String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, ' '); }
+function clockStr(ms) {                    // «2:30» — без слов, одинаково на любом языке
+  const t = Math.max(0, Math.ceil(ms / 1000));
+  if (t < 3600) return Math.floor(t / 60) + ':' + String(t % 60).padStart(2, '0');
+  return Math.floor(t / 3600) + ':' + String(Math.floor(t % 3600 / 60)).padStart(2, '0');
+}
+
+/* рамка грядки: материал зависит от ступени улучшения */
+const BED_FRAME = [
+  { l: '#a8703a', d: '#8a5a2e' },   // 0 — грубое дерево
+  { l: '#c9924e', d: '#a06a33' },   // 1 — струганая доска
+  { l: '#b8bec6', d: '#8a9098' },   // 2 — камень
+  { l: '#d9b06a', d: '#a8874a' },   // 3 — камень с деревом
+  { l: '#ffd54a', d: '#c9971d' },   // 4 — с золотой отделкой
+];
+function drawBed(x, y, wet, tier) {
+  const f = BED_FRAME[Math.min(tier, BED_FRAME.length - 1)];
+  ctx.fillStyle = '#2b1d12';                                  // тёмный контур отделяет грядки друг от друга
+  ctx.fillRect(x, y, TILE, TILE);
+  ctx.fillStyle = f.d; ctx.fillRect(x + 1, y + 1, TILE - 2, TILE - 2);
+  ctx.fillStyle = f.l; ctx.fillRect(x + 1, y + 1, TILE - 2, 1);
+  ctx.fillStyle = '#2b1d12'; ctx.fillRect(x + 2, y + 3, TILE - 4, TILE - 5);
+  ctx.save(); ctx.beginPath(); ctx.rect(x + 3, y + 4, TILE - 6, TILE - 7); ctx.clip();
+  spr(wet ? 'bedWet' : 'bed', x, y);
+  ctx.restore();
+  if (tier >= 3) { ctx.fillStyle = f.l;                       // угловые столбики
+    ctx.fillRect(x + 1, y + 1, 2, 2); ctx.fillRect(x + TILE - 3, y + 1, 2, 2);
+    ctx.fillRect(x + 1, y + TILE - 3, 2, 2); ctx.fillRect(x + TILE - 3, y + TILE - 3, 2, 2); }
+}
+
+/* ═══════════════ Сутки: заводная ферма ═══════════════
+   За DAY_MS солнце обходит двор целиком. Только картинка: тон кадра ступенями, поворот
+   теней, ночью тёплые окна и светлячки над спелым. Рост и экономику не трогает. */
+const DAY_MS = 8 * 60e3;
+const dayPhase = tm => (tm % DAY_MS) / DAY_MS;              // 0 — рассвет, .25 — полдень, ~.7 — закат
+const TONES = [                                              // [фаза, множитель цвета], между узлами линейно
+  [0.00, [232, 184, 160]], [0.08, [255, 244, 224]], [0.22, [255, 255, 255]], [0.52, [255, 248, 228]],
+  [0.64, [244, 176, 120]], [0.74, [186, 166, 214]], [0.82, [150, 160, 205]], [0.92, [142, 154, 200]],
+  [1.00, [232, 184, 160]],
+];
+function dayTone(ph) {
+  ph = Math.floor(ph * 96) / 96;                             // 96 ступеней: тон меняется щелчками, как часы
+  for (let i = 1; i < TONES.length; i++) if (ph <= TONES[i][0]) {
+    const [p0, a] = TONES[i - 1], [p1, b] = TONES[i], k = (ph - p0) / (p1 - p0);
+    const c = a.map((v, j) => Math.round(v + (b[j] - v) * k));
+    // почти белое не множим вовсе — лишний проход по кадру
+    return c[0] > 250 && c[1] > 250 && c[2] > 250 ? null : 'rgb(' + c.join(',') + ')';
+  }
+  return null;
+}
+const isNight = ph => ph > .78 || ph < .04;
+const sunShadow = ph => isNight(ph) ? null : Math.round(-Math.cos(ph * Math.PI * 2) * 3);  // утро — тень влево, вечер — вправо
+
+function drawSway(nm, x, y) {                 // крона качается на 1 px, ствол стоит на месте
+  const img = SPRITES[nm], cut = Math.floor(img.height * .6);
+  const sx = Math.round(Math.sin(animT * .7 + x * .31) * 1.2);
+  ctx.drawImage(img, 0, cut, img.width, img.height - cut, x, y + cut, img.width, img.height - cut);
+  ctx.drawImage(img, 0, 0, img.width, cut, x + sx, y, img.width, cut);
+}
+
+let birds = null, nextBirds = 6;
+function drawBirds(dt, ph, F4) {              // стайка из трёх раз в полминуты, днём
+  if (!birds) {
+    if (animT > nextBirds && !isNight(ph)) birds = { x: -14, y: HUD_H + 4 + rndi(0, 10), v: 22 + rndi(0, 10) };
+    else return;
+  }
+  birds.x += birds.v * dt;
+  if (birds.x > LW + 16) { birds = null; nextBirds = animT + 18 + rndi(0, 26); return; }
+  const f = (F4 % 2) ? 'bird1' : 'bird0';
+  spr(f, birds.x, birds.y); spr(f, birds.x - 7, birds.y + 3); spr(f, birds.x - 6, birds.y - 3);
+}
+
+function drawNight(ph, F8) {                  // поверх вечернего тона: окна и светлячки не темнеют
+  if (!isNight(ph)) return;
+  for (const d of L.decor) if (SPRITES[d.n + 'Win']) spr(d.n + 'Win', d.x, d.y);
+  const tm = now();
+  state.plots.forEach((p, i) => {
+    if (p.c < 0 || !plotReady(p, tm)) return;
+    const r = L.plots[i];
+    for (let k = 0; k < 2; k++) {
+      if ((F8 + i + k * 3) % 7 === 0) continue;                 // мигание вместо альфы
+      const t = animT * (.7 + k * .3) + i * 1.7 + k * 2.1;
+      ctx.fillStyle = k ? '#fff3b0' : '#ffd54a';
+      ctx.fillRect(r.x + 3 + Math.round((Math.sin(t) + 1) * 5), r.y - 3 - Math.round((Math.cos(t * 1.3) + 1) * 3), 1, 1);
+    }
+  });
+}
+
+/* ═══════════════ Фермер ═══════════════
+   Живёт по распорядку: находит дело, идёт к нему, отрабатывает, отдыхает. Ночью уходит
+   в дом — тогда и горят окна.
+
+   ВАЖНО: дела он делает ЖЕСТОМ, состояние фермы не меняется. Подходит к неполитой грядке,
+   поливает на вид — лейка, капли, звук, — и уходит к следующей. Решено 2026-08-13: полив
+   с настоящим эффектом ускорял рост примерно на треть тому, кто просто держит игру
+   открытой, и сдвигал соотношение активного и казуального игрока из симулятора
+   docs/superpowers/sim/pixel-farm-economy.js. Сбор урожая и кормёжка — тем более только
+   игрока: это его деньги и инвентарь.
+
+   Отсюда ротация: без эффекта грядка остаётся сухой, и без обхода по кругу фермер
+   поливал бы первую вечно. */
+let farmer = null;
+const FARM_W = 14, FARM_H = 18, FARM_SPD = 15, FARM_WORK = 1.2;
+
+function farmerBounds() {
+  return { x0: 3, x1: Math.max(3, LW - FARM_W - 3), y0: L.pen.y + L.pen.h + 4,
+           y1: Math.max(L.pen.y + L.pen.h + 4, LH - BAR_H - FARM_H - 4) };
+}
+/* Проходимость считаем по ногам, а не по шляпе: сверху фермер может заходить за крону.
+   Препятствие у декорации — тоже только её основание, иначе он не пройдёт под ветками. */
+function farmerFeet(x, y) { return { x: x + 2, y: y + FARM_H - 5, w: FARM_W - 4, h: 5 }; }
+function farmerFree(x, y) {
+  const f = farmerFeet(x, y);
+  if (hitR(f, { x: L.fx - 2, y: L.fy - 2, w: L.fw + 4, h: L.fh + 4 })) return false;
+  for (const d of L.decor) {
+    const w = SW(d.n), h = SH(d.n);
+    if (hitR(f, { x: d.x + 1, y: d.y + h - 5, w: w - 2, h: 5 })) return false;
+  }
+  return true;
+}
+/* Ходит он по прямой, поэтому мало проверить цель — надо проверить и дорогу до неё,
+   иначе фермер срезает сквозь пень и выглядит как баг. */
+function farmerPath(x0, y0, x1, y1) {
+  const d = Math.hypot(x1 - x0, y1 - y0), steps = Math.max(1, Math.ceil(d / 2));   // 2 px: основание декорации всего 5 px, шаг в 4 px её проскакивал
+  for (let i = 1; i <= steps; i++)
+    if (!farmerFree(x0 + (x1 - x0) * i / steps, y0 + (y1 - y0) * i / steps)) return false;
+  return true;
+}
+const farmerClampX = x => Math.max(farmerBounds().x0, Math.min(farmerBounds().x1, x));
+const farmerClampY = y => Math.max(farmerBounds().y0, Math.min(farmerBounds().y1, y));
+
+/* дело: первая растущая неполитая грядка. Стоим сбоку от неё, а не на ней */
+function farmerJob(tm) {
+  const total = state.plots.length;
+  for (let k = 0; k < total; k++) {
+    const i = (farmer.scan + k) % total;                     // обход по кругу, а не всегда с нуля
+    const p = state.plots[i];
+    if (p.c < 0 || p.wet || !plotGrowing(p, tm)) continue;
+    const r = L.plots[i];
+    const y = farmerClampY(r.y + TILE - FARM_H + 5);
+    const near = farmer.x > r.x, sides = near ? [r.x + TILE - 5, r.x - FARM_W + 5]
+                                              : [r.x - FARM_W + 5, r.x + TILE - 5];
+    for (const sx of sides) {                                // подходим с той стороны, куда есть дорога
+      const x = farmerClampX(sx);
+      if (farmerFree(x, y) && farmerPath(farmer.x, farmer.y, x, y)) {
+        farmer.scan = i + 1;
+        return { kind: 'water', i, x, y };
+      }
+    }
+  }
+  return null;
+}
+function farmerHomeSpot() {
+  return L.home ? { x: farmerClampX(L.home.x + Math.floor((L.home.w - FARM_W) / 2)),
+                    y: farmerClampY(L.home.y + L.home.h - FARM_H + 4) } : null;
+}
+function farmerPick() {
+  const tm = now();
+  if (isNight(dayPhase(tm))) {
+    const h = farmerHomeSpot();
+    farmer.job = { kind: 'home' };
+    farmer.tx = h ? h.x : farmer.x; farmer.ty = h ? h.y : farmer.y;
+    return;
+  }
+  const j = farmerJob(tm);
+  if (j) { farmer.job = j; farmer.tx = j.x; farmer.ty = j.y; return; }
+  farmer.job = null;                                 // дел нет — обход двора
+  const b = farmerBounds();
+  for (let i = 0; i < 30; i++) {
+    const x = b.x0 + Math.random() * (b.x1 - b.x0), y = b.y0 + Math.random() * (b.y1 - b.y0);
+    if (farmerFree(x, y) && farmerPath(farmer.x, farmer.y, x, y)) { farmer.tx = x; farmer.ty = y; return; }
+  }
+  farmer.tx = farmer.x; farmer.ty = farmer.y;
+}
+function farmerInit() {
+  const b = farmerBounds();
+  farmer = { x: farmerClampX(L.fx - FARM_W - 6), y: b.y0, tx: 0, ty: 0,
+             st: 'wait', wait: .4, workT: 0, job: null, flip: false, phase: 0, scan: 0 };
+  if (!farmerFree(farmer.x, farmer.y))                       // на старте могли поставить в куст
+    for (let i = 0; i < 60; i++) {
+      const x = b.x0 + Math.random() * (b.x1 - b.x0), y = b.y0 + Math.random() * (b.y1 - b.y0);
+      if (farmerFree(x, y)) { farmer.x = x; farmer.y = y; break; }
+    }
+  farmerPick();
+}
+/* конец работы: только капли и звук. Состояние грядки не трогаем — см. шапку блока */
+function farmerFinish(tm) {
+  const j = farmer.job;
+  if (!j || j.kind !== 'water') return;
+  const p = state.plots[j.i];
+  if (!p || p.c < 0 || !plotGrowing(p, tm)) return;           // грядку успели собрать — лить не по чему
+  const r = L.plots[j.i];
+  Sound.water(); addDrops(r.x + TILE / 2, r.y + 6);
+}
+function farmerStep(dt) {
+  const tm = now(), night = isNight(dayPhase(tm));
+
+  if (farmer.st === 'home') {                        // спит; на рассвете выходит на порог
+    if (night) return;
+    const h = farmerHomeSpot();
+    if (h) { farmer.x = h.x; farmer.y = h.y; }
+    farmer.st = 'wait'; farmer.wait = .6; farmer.job = null;
+    return;
+  }
+  farmer.x = farmerClampX(farmer.x); farmer.y = farmerClampY(farmer.y);
+
+  if (farmer.st === 'work') {
+    farmer.workT -= dt;
+    if (farmer.workT <= 0) { farmerFinish(tm); farmer.st = 'wait'; farmer.wait = 2.5 + Math.random() * 2.5; }
+    return;
+  }
+  if (farmer.st === 'wait') {
+    farmer.wait -= dt;
+    if (farmer.wait <= 0) { farmerPick(); farmer.st = 'go'; }
+    return;
+  }
+  if (night && (!farmer.job || farmer.job.kind !== 'home')) { farmerPick(); return; }  // застал закат в пути
+
+  const dx = farmer.tx - farmer.x, dy = farmer.ty - farmer.y, d = Math.hypot(dx, dy);
+  if (d < 1.2) {
+    const k = farmer.job && farmer.job.kind;
+    if (k === 'home') { farmer.st = 'home'; return; }
+    if (k === 'water') {
+      const r = L.plots[farmer.job.i];
+      farmer.flip = farmer.x + FARM_W / 2 > r.x + TILE / 2;   // разворачиваемся к грядке
+      farmer.st = 'work'; farmer.workT = FARM_WORK; return;
+    }
+    farmer.st = 'wait'; farmer.wait = 1.2 + Math.random() * 2.4; return;
+  }
+  const k = FARM_SPD * dt / d;
+  farmer.x += dx * k; farmer.y += dy * k;
+  if (Math.abs(dx) > .5) farmer.flip = dx < 0;
+  farmer.phase += dt * 6;
+}
+function drawFarmer(shx, F4) {
+  const st = farmer.st;
+  const nm = st === 'work' ? (F4 % 4 < 2 ? 'farmWk' : 'farmI0')
+           : st === 'go'   ? (Math.floor(farmer.phase) % 2 ? 'farmW1' : 'farmW0')
+           :                 (F4 % 8 < 4 ? 'farmI0' : 'farmI1');
+  const x = Math.round(farmer.x), y = Math.round(farmer.y);
+  if (shx !== null) spr('shadow', x + shx + 2, y + FARM_H - 4);
+  if (farmer.flip) {                                 // зеркалим целым пикселем, без дробного масштаба
+    ctx.save(); ctx.translate(x * 2 + FARM_W, 0); ctx.scale(-1, 1); spr(nm, x, y); ctx.restore();
+  } else spr(nm, x, y);
+  if (st === 'work' && farmer.job && farmer.job.kind === 'water')   // лейка в вытянутой руке
+    spr('can', farmer.flip ? x - SW('can') + 4 : x + FARM_W - 4, y + 7);
+}
+
+let vign = null;
+function buildVignette() {                   // затемнение углов дизерингом, печётся один раз на размер
+  const c = document.createElement('canvas'); c.width = LW; c.height = LH;
+  const x = c.getContext('2d'); x.fillStyle = '#161008';
+  const B = [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]];
+  const cx = LW / 2, cy = LH / 2;
+  for (let j = 0; j < LH; j++) for (let i = 0; i < LW; i++) {
+    const r = Math.hypot((i - cx) / cx, (j - cy) / cy);
+    const dark = Math.max(0, Math.min(1, (r - 1.02) / .45)) * .42;   // только самая кромка кадра
+    if (dark * 16 > B[j & 3][i & 3]) x.fillRect(i, j, 1, 1);
+  }
+  vign = c;
+}
+
+/* ═══════════════ Рендер мира ═══════════════ */
+const CLOUDS = [{ n: 'cshadow0', x0: 10, y: 34, v: 3.5 }, { n: 'cshadow1', x0: 130, y: 96, v: 2.6 },
+                { n: 'cshadow2', x0: 250, y: 142, v: 4.4 }];
+const BFLY = [{ x: 0, y: 0, a: .6, p: 0, sp: 9 }, { x: 0, y: 0, a: 2.4, p: 1, sp: 7 }];
+let animT = 0;
+
+function drawWorld(dt, tm, F4, F8) {
+  const ph = dayPhase(tm), shx = sunShadow(ph);
+  /* трава: вариант тайла по хэшу, чтобы не читалась регулярная решётка */
+  for (let y = 0, ry = 0; y < LH; y += TILE, ry++)
+    for (let x = 0, rx = 0; x < LW; x += TILE, rx++) {
+      let h = (rx * 374761393 + ry * 668265263) | 0;
+      h = (h ^ (h >> 13)) * 1274126177 | 0;
+      const v = ((h ^ (h >> 16)) >>> 0) % 10;
+      spr(v === 0 ? 'grass1' : v === 1 ? 'grass2' : 'grass0', x, y);
+    }
+  for (const c of CLOUDS)                                  // тени облаков ползут по земле
+    spr(c.n, ((c.x0 + animT * c.v) % (LW + 60)) - SW(c.n) - 20, c.y);
+  if (L.path) groundPatch(L.path.x, L.path.y, L.path.w, L.path.h, 0xA7C3);
+
+  /* загон */
+  const pen = L.pen;
+  groundPatch(pen.x, pen.y, pen.w, pen.h, 0xD117);
+  if (state.up.pen >= 4) spr('shelter', pen.x + Math.floor((pen.w - SW('shelter')) / 2), pen.y - 12);
+  for (let x = pen.x; x < pen.x + pen.w; x += TILE) spr('fence', x, pen.y - 6);
+  ctx.fillStyle = '#6b4423';
+  ctx.fillRect(pen.x - 1, pen.y - 4, 2, 9); ctx.fillRect(pen.x + pen.w - 1, pen.y - 4, 2, 9);
+  if (state.up.pen >= 1) spr('trough', pen.x + 2, pen.y + pen.h - SH('trough') - 1);
+  if (state.up.pen >= 2) { for (let x = pen.x; x < pen.x + pen.w; x += TILE) spr('fence', x, pen.y + pen.h - 4); }
+  if (state.up.pen >= 3) spr('trough', pen.x + pen.w - SW('trough') - 2, pen.y + pen.h - SH('trough') - 1);
+
+  for (let i = 0; i < ANIMAL_SLOTS; i++) {
+    const a = state.animals[i], s = L.slots[i];
+    const ax = s.x + Math.floor((s.w - 14) / 2), ay = s.y + s.h - 16;
+    if (a.id < 0) {
+      const open = ANIMALS.some(an => an.unlock <= state.level);
+      const mx = ax - 1, my = ay - 1, ms = 16;
+      ctx.fillStyle = 'rgba(255,246,221,.12)'; ctx.fillRect(mx, my, ms, ms);
+      ctx.fillStyle = 'rgba(255,246,221,.5)';
+      for (let k = 0; k < ms; k += 2) { ctx.fillRect(mx + k, my, 1, 1); ctx.fillRect(mx + k, my + ms - 1, 1, 1); }
+      for (let k = 0; k < ms; k += 2) { ctx.fillRect(mx, my + k, 1, 1); ctx.fillRect(mx + ms - 1, my + k, 1, 1); }
+      spr(open ? 'plus' : 'lock', mx + 3, my + 3);
+    } else {
+      const ph = animT * .5 + i * 1.9;
+      const step = Math.round(Math.sin(ph) * 3);             // шаг в целых пикселях
+      const flip = Math.cos(ph) < 0;
+      const hop = (F4 + i) % 6 === 0 ? -1 : 0;
+      const x = ax + step;
+      if (shx !== null) spr('shadow', x + 2 + shx, ay + 13);
+      if (flip) { ctx.save(); ctx.translate(x * 2 + 16, 0); ctx.scale(-1, 1); }
+      spr('anim' + a.id, x, ay + hop);
+      if (flip) ctx.restore();
+      const bub = ay - 11 + ((F4 + i) % 4 < 2 ? 0 : 1);
+      if (animReady(a, tm)) spr('mp' + a.id, x + 3, bub);
+      else if (animBusy(a, tm)) meter(x + 1, ay + 15, 14, (tm - a.fedAt) / prodMs(a.id), '#ffd54a');
+      else spr(miniFeed(ANIMALS[a.id].feed), x + 3, bub);
+    }
+  }
+
+  /* декорации */
+  farmerStep(dt);
+  let fDrawn = farmer.st === 'home', fBase = farmer.y + FARM_H;   // дома — не рисуем, горят окна
+  for (const d of L.decor) {
+    if (!fDrawn && fBase <= d.y + SH(d.n)) { drawFarmer(shx, F4); fDrawn = true; }
+    if (shx !== null) {                                      // тень уходит вслед за солнцем, ночью её нет
+      if (d.n === 'tree' || d.n === 'tree2') spr('shadowL', d.x + shx + Math.floor((SW(d.n) - SW('shadowL')) / 2), d.y + SH(d.n) - 5);
+      else if (d.n === 'treeSm' || d.n.startsWith('house') || d.n === 'barn' || d.n === 'hay')
+        spr('shadow', d.x + shx + Math.floor((SW(d.n) - SW('shadow')) / 2), d.y + SH(d.n) - 4);
+    }
+    if (d.n === 'tree' || d.n === 'tree2' || d.n === 'treeSm') drawSway(d.n, d.x, d.y);
+    else spr(d.n, d.x, d.y);
+  }
+  if (!fDrawn) drawFarmer(shx, F4);
+  drawBirds(dt, ph, F4);
+
+  /* поле */
+  const owned = state.plots.length;
+  for (let i = 0; i < MAX_PLOTS && i <= owned; i++) {
+    const r = L.plots[i];
+    if (i < owned) {
+      const p = state.plots[i];
+      drawBed(r.x, r.y, p.c >= 0 && p.wet, state.up.plot);
+      if (p.c >= 0) {
+        const cs = 'crop' + p.c, cx = r.x + Math.floor((TILE - SW(cs)) / 2);
+        if (plotReady(p, tm)) {
+          spr('bush', r.x, r.y);
+          spr(cs, cx, r.y + 1 + ((F4 + i) % 6 < 3 ? 0 : 1));
+        } else {
+          const pr = (tm - p.at) / growMs(p.c);
+          spr(pr < .5 ? 'sprout' : 'bush', r.x, r.y);
+          meter(r.x + 2, r.y + TILE - 5, TILE - 4, pr, '#7ecbe0');
+        }
+      }
+    } else {                                                 // размеченное место под новую грядку
+      ctx.fillStyle = '#6f8f3e'; ctx.fillRect(r.x + 1, r.y + 1, TILE - 2, TILE - 2);
+      ctx.fillStyle = '#7d5a33';
+      for (let k = 1; k < TILE - 1; k += 3) {
+        ctx.fillRect(r.x + k, r.y + 1, 2, 1); ctx.fillRect(r.x + k, r.y + TILE - 2, 2, 1);
+        ctx.fillRect(r.x + 1, r.y + k, 1, 2); ctx.fillRect(r.x + TILE - 2, r.y + k, 1, 2);
+      }
+      spr('plus', r.x + 3, r.y + 3);
+      const price = fmtN(PLOT_PRICES[i]), pw = iconNumW('coin', price);
+      const px = Math.max(1, Math.min(LW - pw - 2, r.x + Math.floor((TILE - pw) / 2))), py = r.y + TILE - 1;
+      ctx.fillStyle = '#2b1d12'; ctx.fillRect(px - 2, py - 1, pw + 4, 12);
+      ctx.fillStyle = '#4a3520'; ctx.fillRect(px - 1, py, pw + 2, 10);
+      iconNum('coin', price, px, py, state.coins >= PLOT_PRICES[i] ? '#ffe066' : '#ff9a86');
+    }
+  }
+
+  /* подсказка туториала */
+  if (state.tut < 3) {
+    let idx = state.tut === 0 ? state.plots.findIndex(p => p.c < 0) : state.plots.findIndex(p => p.c >= 0);
+    if (idx < 0) idx = 0;
+    const r = L.plots[idx];
+    spr('arrow', r.x + 4, r.y - 11 + (F4 % 2 ? 0 : 1));
+  }
+
+  /* эффекты */
+  for (let i = drops.length - 1; i >= 0; i--) {
+    const d = drops[i]; d.t += dt;
+    if (d.t > .45) { drops.splice(i, 1); continue; }
+    ctx.fillStyle = '#8fd8f0'; ctx.fillRect(Math.round(d.x), Math.round(d.y + d.v * d.t), 1, 2);
+  }
+  for (let i = pops.length - 1; i >= 0; i--) {               // всплывающий спрайт (лейка при поливе)
+    const p = pops[i]; p.t += dt;
+    if (p.t > .5) { pops.splice(i, 1); continue; }
+    spr(p.n, p.x, p.y - Math.floor(p.t * 8));
+  }
+  for (let i = sparks.length - 1; i >= 0; i--) {
+    const s = sparks[i]; s.t += dt;
+    if (s.t >= s.life) { sparks.splice(i, 1); continue; }
+    s.x += s.vx * dt; s.y += s.vy * dt; s.vy += 90 * dt;
+    ctx.fillStyle = SPARK_RAMP[Math.min(2, Math.floor(s.t / s.life * 3))];
+    ctx.fillRect(Math.round(s.x), Math.round(s.y), 2, 2);
+  }
+  for (let i = flys.length - 1; i >= 0; i--) {
+    const f = flys[i]; f.t += dt * 1.7;
+    if (f.t >= 1) { flys.splice(i, 1); continue; }
+    const e = f.t * f.t;
+    spr(f.n, f.sx + (10 - f.sx) * e, f.sy + (LH - BAR_H / 2 - 4 - f.sy) * e);
+  }
+  for (let i = floats.length - 1; i >= 0; i--) {
+    const f = floats[i]; f.t += dt;
+    if (f.t >= 1.15) { floats.splice(i, 1); continue; }
+    if (f.t > .8 && F8 % 2) continue;                        // мигание вместо альфы
+    const y = f.y - Math.floor(f.t * 14);
+    const w = f.kind ? iconNumW(f.kind, f.val) : textW(f.val);
+    const x = Math.round(f.x - w / 2);
+    if (f.kind) iconNum(f.kind, f.val, x, y, f.col); else text(f.val, x, y, f.col);
+  }
+
+  /* бабочки */
+  for (const b of BFLY) {
+    if (!b.x) { b.x = L.fx + 8 + b.p * 20; b.y = L.fy - 12; }
+    b.a += (Math.sin(animT * .9 + b.p * 3) + Math.sin(animT * .27 + b.p)) * dt * 1.6;
+    b.x += Math.cos(b.a) * b.sp * dt; b.y += Math.sin(b.a) * b.sp * dt * .7;
+    if (b.x < 4) { b.x = 4; b.a = 0; } if (b.x > LW - 12) { b.x = LW - 12; b.a = Math.PI; }
+    if (b.y < HUD_H + 4) { b.y = HUD_H + 4; b.a = 1.2; }
+    if (b.y > LH - BAR_H - 12) { b.y = LH - BAR_H - 12; b.a = -1.2; }
+    spr('bfly' + b.p + (F8 % 2 ? 'a' : 'b'), b.x, b.y);
+  }
+}
+
+/* ═══════════════ Интерфейс: рисуется тем же буфером и тем же шрифтом ═══════════════
+   Кликабельные области собираются каждый кадр в hits и разбираются в onTap.        */
+let ui = null;                 // null | {kind:'seed'|'animals'|'market'|'shop'|'popup', ...}
+let hits = [];
+const pushHit = (x, y, w, h, fn) => hits.push({ x, y, w, h, fn });
+let ditherPat = null;
+function buildDither() {
+  const dc = document.createElement('canvas'); dc.width = dc.height = 2;
+  const dx = dc.getContext('2d');
+  dx.fillStyle = '#161008'; dx.fillRect(0, 0, 1, 1); dx.fillRect(1, 1, 1, 1);
+  ditherPat = ctx.createPattern(dc, 'repeat');
+}
+function openUI(o) { o.at = animT; ui = o; Sound.open(); YSDK.gameplayStop(); }
+function closeUI() { if (ui) Sound.close(); ui = null; if (!document.hidden) YSDK.gameplayStart(); }
+
+/* ── коробки и кнопки ── */
+function box(x, y, w, h) {                       // пергаментная табличка
+  ctx.fillStyle = '#2b1d12'; ctx.fillRect(x, y, w, h);
+  ctx.fillStyle = '#cbab74'; ctx.fillRect(x + 1, y + 1, w - 2, h - 2);
+  ctx.fillStyle = '#f2e0b4'; ctx.fillRect(x + 2, y + 2, w - 4, h - 4);
+}
+function slab(x, y, w, h, col, lo, hi) {         // выпуклая плашка/кнопка
+  ctx.fillStyle = '#2b1d12'; ctx.fillRect(x, y, w, h);
+  ctx.fillStyle = col; ctx.fillRect(x + 1, y + 1, w - 2, h - 2);
+  ctx.fillStyle = hi; ctx.fillRect(x + 1, y + 1, w - 2, 1);
+  ctx.fillStyle = lo; ctx.fillRect(x + 1, y + h - 2, w - 2, 1);
+}
+const BTN = {
+  green: ['#3fae52', '#237a32', '#6ed67f'], blue: ['#4a86e8', '#2a56a8', '#7db0ff'],
+  ad: ['#9053d8', '#63329c', '#b788ee'], wood: ['#7a4a22', '#563518', '#96602e'],
+  grey: ['#6b6f76', '#4a4d52', '#93989f'],
+};
+let pressed = null;                                              // {x,y,w,h,at} — какую область нажали и когда
+function button(x, y, w, h, label, kind, fn, icon) {
+  const c = BTN[kind] || BTN.wood;
+  const down = pressed && pressed.x === x && pressed.y === y && animT - pressed.at < .12;
+  const oy = down ? 1 : 0;
+  slab(x, y + oy, w, h - oy, down ? c[1] : c[0], c[1], down ? c[1] : c[2]);
+  label = fitText(label, w - 6 - (icon ? SW(icon) + 2 : 0));    // подпись не вылезает за кнопку
+  let tx = x + Math.floor((w - (textW(label) + (icon ? SW(icon) + 2 : 0))) / 2);
+  if (icon) { spr(icon, tx, y + oy + Math.floor((h - SH(icon)) / 2)); tx += SW(icon) + 2; }
+  text(label, tx, y + oy + Math.floor((h - FONT_H) / 2), fn ? '#ffffff' : '#c9c4b8');
+  if (fn) pushHit(x, y, w, h, fn);
+}
+
+/* ── HUD ── */
+let shownCoins = null;
+function drawHUD() {
+  if (shownCoins === null) shownCoins = state.coins;
+  const dc = state.coins - shownCoins;                             // счётчик догоняет целыми шагами
+  if (dc) shownCoins += Math.sign(dc) * Math.max(1, Math.ceil(Math.abs(dc) * .2));
+  const coins = fmtN(shownCoins), cw = iconNumW('coin', coins) + 8;
+  panel(2, 2, cw, 13); iconNum('coin', coins, 6, 4, '#ffe066');
+  const lvl = String(state.level);
+  const lw = Math.max(24, Math.min(46, L.snd.x - (cw + 5) - 3));   // не наезжаем на кнопку звука
+  panel(cw + 5, 2, lw, 13);
+  iconNum('star', lvl, cw + 9, 3, '#fff6dd');
+  const bx = cw + 9 + 11 + textW(lvl) + 4;
+  meter(bx, 6, Math.max(6, cw + 5 + lw - bx - 5), state.xp / xpNeed(state.level), '#5ddc6e');
+  panel(L.snd.x, L.snd.y - 1, L.snd.w, L.snd.h);
+  spr(state.muted ? 'spkOff' : 'spkOn', L.snd.x + 1, L.snd.y + 1);
+  pushHit(L.snd.x, L.snd.y - 1, L.snd.w, L.snd.h, () => {
+    state.muted = !state.muted; Sound.setMuted(state.muted); save();
+  });
+}
+
+/* ── нижняя панель: инвентарь и кнопки ── */
+function invEntries() {
+  const out = [];
+  CROPS.forEach((c, i) => { const n = state.inv['c' + i] || 0; if (n > 0) out.push({ key: 'c' + i, spr: 'crop' + i, name: T.crops[i], n, price: sellCrop(i) }); });
+  ANIMALS.forEach((a, i) => { const n = state.inv['p' + i] || 0; if (n > 0) out.push({ key: 'p' + i, spr: 'prod' + i, name: T.products[i], n, price: sellProd(i) }); });
+  return out;
+}
+function drawBar(tm) {
+  const y = LH - BAR_H;
+  ctx.fillStyle = '#2b1d12'; ctx.fillRect(0, y, LW, BAR_H);
+  ctx.fillStyle = '#7a4a22'; ctx.fillRect(0, y + 2, LW, BAR_H - 2);
+  for (let x = 0; x < LW; x += 22) { ctx.fillStyle = '#6b4020'; ctx.fillRect(x, y + 2, 1, BAR_H - 2); }
+  ctx.fillStyle = '#96602e'; ctx.fillRect(0, y + 2, LW, 1);
+
+  // кнопки справа
+  const busy = state.plots.some(p => plotGrowing(p, tm)) || state.animals.some(a => animBusy(a, tm));
+  // порядок важен: первая кнопка встаёт правее всех, а рынок нужен чаще прочего.
+  // «Ускорить» приходит и уходит, поэтому стоит последней — постоянные кнопки не прыгают.
+  const btns = [];
+  btns.push(['basket', 'green', () => openUI({ kind: 'market' })]);
+  btns.push(['scroll', state.orders.some(orderReady) ? 'green' : 'wood', () => openUI({ kind: 'orders' })]);
+  btns.push(['hammer', 'wood', () => openUI({ kind: 'shop' })]);
+  if (busy && state.tut >= 4) btns.push(['bolt', 'ad', () => YSDK.showRewarded(() => {
+    const cut = 5 * MIN;
+    for (const p of state.plots) if (p.c >= 0) p.at -= cut;
+    for (const a of state.animals) if (a.id >= 0 && a.fedAt > 0) a.fedAt -= cut;
+    save(); Sound.coins(2);
+  }, () => {})]);
+  let bx = LW - 2;
+  const pad = LW < 160 ? 4 : 6;                                // на узком экране кнопки поджимаем
+  for (const [icon, kind, fn] of btns) {
+    const w = SW(icon) + pad; bx -= w + 2;
+    const c = BTN[kind];
+    slab(bx, y + 2, w, BAR_H - 4, c[0], c[1], c[2]);
+    spr(icon, bx + Math.floor((w - SW(icon)) / 2), y + 2 + Math.floor((BAR_H - 4 - SH(icon)) / 2));
+    pushHit(bx, y + 2, w, BAR_H - 4, fn);
+  }
+  if (state.tut === 3) {                                       // подсветка «Рынка»
+    const p = LW - 2 - (SW('basket') + 8);
+    ctx.fillStyle = (Math.floor(animT * 3) % 2) ? '#ffe066' : '#2b1d12';
+    ctx.fillRect(p - 1, y + 1, SW('basket') + 8, 1); ctx.fillRect(p - 1, y + BAR_H - 2, SW('basket') + 8, 1);
+  }
+
+  // инвентарь слева. На узком экране убираем «×» и зазоры — иначе не влезает ни одной иконки
+  const items = invEntries();
+  const tight = LW < 160;
+  let x = 3;
+  for (let i = 0; i < items.length; i++) {
+    const it = items[i], cnt = (tight ? '' : '×') + it.n;
+    const w = SW(it.spr) + 1 + textW(cnt) + (tight ? 2 : 4);
+    const rest = items.length - i, mark = '+' + rest, mw = textW(mark) + 3;
+    // на широком экране резервируем место под счётчик остатка, на узком он съел бы саму иконку
+    if (x + w + (!tight && rest > 1 ? mw : 0) > bx - 4) {
+      if (!tight && x + mw <= bx - 2) text(mark, x + 1, y + 7, '#ffe066');
+      break;
+    }
+    spr(it.spr, x, y + Math.floor((BAR_H - SH(it.spr)) / 2));
+    text(cnt, x + SW(it.spr) + 1, y + 7, '#ffe066');
+    x += w;
+  }
+  if (!items.length) text(fitText(T.empty, bx - 10), 4, y + 7, '#c9ab74');
+}
+
+/* ── туториал ── */
+function drawTutorial() {
+  if (state.tut >= 4) return;
+  const maxW = Math.min(LW - 16, 180);
+  const lines = wrapText(T.tut[state.tut], maxW - 8);
+  const h = lines.length * 9 + 7, w = maxW;
+  const x = Math.floor((LW - w) / 2), y = LH - BAR_H - h - 4;
+  box(x, y, w, h);
+  lines.forEach((l, i) => textC(l, x + w / 2, y + 4 + i * 9, '#4a3520', null));
+}
+
+/* ── каркас модального экрана ── */
+function screenBox(titleStr, contentH, opts) {
+  opts = opts || {};
+  const onClose = opts.onClose || closeUI;
+  ctx.fillStyle = ditherPat; ctx.fillRect(0, 0, LW, LH);
+  const w = Math.min(LW - 6, 230);
+  const h = Math.min(LH - 8, contentH + 20);
+  const k = Math.min(3, Math.floor((animT - (ui && ui.at || 0)) / .035));   // выезд снизу за 4 кадра, целыми пикселями
+  const x = Math.floor((LW - w) / 2), y = Math.floor((LH - h) / 2) + (3 - k) * 2;
+  box(x, y, w, h);
+  ctx.fillStyle = '#cbab74'; ctx.fillRect(x + 3, y + 13, w - 6, 1);
+  const titleW = opts.noClose ? w - 10 : w - 36;               // у попапов крестика нет — заголовку больше места
+  textC(fitText(titleStr, titleW), x + (opts.noClose ? w : w - 16) / 2, y + 4, '#4a3520', null);
+  pushHit(0, 0, LW, LH, onClose);                              // тап мимо окна — закрыть
+  if (!opts.noClose) {
+    spr('close', x + w - 13, y + 3);                           // крестик добавлен позже → он выше фона
+    pushHit(x + w - 15, y + 1, 14, 14, onClose);
+  }
+  return { x, y, w, h, cx: x + 3, cy: y + 16, cw: w - 6, ch: h - 19 };
+}
+// сетка строк: колонки подбираются так, чтобы всё поместилось без прокрутки
+function gridCols(n, availH, rowH) {
+  let cols = 1;
+  while (Math.ceil(n / cols) * rowH > availH && cols < 4) cols++;
+  return cols;
+}
+
+/* ── экран «что посадить» ── */
+function drawSeedScreen() {
+  const rowH = 24, cols = gridCols(CROPS.length, LH - 34, rowH);
+  const rows = Math.ceil(CROPS.length / cols);
+  const b = screenBox(T.seedTitle, rows * rowH + 14);
+  const cw = Math.floor(b.cw / cols);
+  CROPS.forEach((c, i) => {
+    const cx = b.cx + (i % cols) * cw, cy = b.cy + ((i / cols) | 0) * rowH;
+    const locked = c.unlock > state.level, poor = state.coins < c.seed;
+    slab(cx + 1, cy, cw - 2, rowH - 2, locked ? '#c3ab7e' : '#e8d29c', '#c3a468', '#fbeec4');
+    if (locked) {
+      spr('lock', cx + 4, cy + 6);
+      text(T.crops[i], cx + 18, cy + 4, '#8a6a40', null);
+      text(T.lockLvl(c.unlock), cx + 18, cy + 13, '#8a6a40', null);
+    } else {
+      spr('crop' + i, cx + 3, cy + 4);
+      text(fitText(T.crops[i], cw - 25 - iconNumW('coin', fmtN(c.seed))), cx + 19, cy + 3, '#4a3520', null);
+      iconNum('clkD', clockStr(c.grow), cx + 19, cy + 11, '#5a4632', null);   // время роста
+      const sv = '+' + fmtN(sellCrop(i));                                     // сколько выручим
+      textR(sv, cx + cw - 6, cy + 13, '#2f7a3c', null);
+      const pr = fmtN(c.seed), pw = iconNumW('coin', pr);
+      iconNum('coin', pr, cx + cw - pw - 5, cy + 2, poor ? '#c0392b' : '#8a5407', null);
+      pushHit(cx + 1, cy, cw - 2, rowH - 2, () => {
+        if (state.coins < c.seed) { Sound.error(); return; }
+        state.coins -= c.seed;
+        state.plots[ui.plot] = { c: i, at: now(), wet: 0 };
+        Sound.plant(); save();
+        if (state.tut === 0) setTut(1);
+        closeUI();
+      });
+    }
+  });
+  // если не хватает даже на самое дешёвое — предложить монеты за рекламу
+  const cheapest = Math.min(...CROPS.filter(c => c.unlock <= state.level).map(c => c.seed));
+  const by = b.cy + rows * rowH;
+  if (state.coins < cheapest) {
+    const n = 25 * state.level;
+    button(b.cx + 2, by, b.cw - 4, 12, T.freeCoins(n), 'ad',
+      () => YSDK.showRewarded(() => { state.coins += n; save(); Sound.coins(3); }, () => {}), 'film');
+  }
+}
+
+/* ── экран «животные» ── */
+function drawAnimalScreen() {
+  const rowH = 24, cols = gridCols(ANIMALS.length, LH - 34, rowH);
+  const rows = Math.ceil(ANIMALS.length / cols);
+  const b = screenBox(T.animalTitle, rows * rowH + 2);
+  const cw = Math.floor(b.cw / cols);
+  ANIMALS.forEach((a, i) => {
+    const cx = b.cx + (i % cols) * cw, cy = b.cy + ((i / cols) | 0) * rowH;
+    const locked = a.unlock > state.level, poor = state.coins < a.cost;
+    slab(cx + 1, cy, cw - 2, rowH - 2, locked ? '#c3ab7e' : '#e8d29c', '#c3a468', '#fbeec4');
+    if (locked) {
+      spr('lock', cx + 4, cy + 6);
+      text(T.animals[i], cx + 18, cy + 4, '#8a6a40', null);
+      text(T.lockLvl(a.unlock), cx + 18, cy + 13, '#8a6a40', null);
+    } else {
+      spr('anim' + i, cx + 2, cy + 4);
+      text(fitText(T.animals[i], cw - 25 - iconNumW('coin', fmtN(a.cost))), cx + 19, cy + 3, '#4a3520', null);
+      spr(miniFeed(a.feed), cx + 19, cy + 12);                 // корм → продукт
+      text('→', cx + 30, cy + 14, '#6b5636', null);
+      spr('mp' + i, cx + 39, cy + 12);
+      const sv = '+' + fmtN(sellProd(i));
+      textR(sv, cx + cw - 6, cy + 14, '#2f7a3c', null);
+      const pr = fmtN(a.cost), pw = iconNumW('coin', pr);
+      iconNum('coin', pr, cx + cw - pw - 5, cy + 2, poor ? '#c0392b' : '#8a5407', null);
+      pushHit(cx + 1, cy, cw - 2, rowH - 2, () => {
+        if (state.coins < a.cost) { Sound.error(); return; }
+        state.coins -= a.cost;
+        state.animals[ui.slot] = { id: i, fedAt: 0 };
+        Sound.buy(); save(); closeUI();
+      });
+    }
+  });
+}
+
+/* ── экран «рынок» ── */
+function drawMarketScreen() {
+  const items = invEntries();
+  const rowH = 14, cols = gridCols(Math.max(1, items.length), LH - 66, rowH);
+  const rows = Math.max(1, Math.ceil(items.length / cols));
+  const b = screenBox(T.marketTitle, rows * rowH + 30);
+  const cw = Math.floor(b.cw / cols);
+  let total = 0;
+  items.forEach((it, i) => {
+    total += it.n * it.price;
+    const cx = b.cx + (i % cols) * cw, cy = b.cy + ((i / cols) | 0) * rowH;
+    spr(it.spr, cx + 1, cy);
+    const s = fmtN(it.n * it.price), sw2 = iconNumW('coin', s), cnt = '×' + it.n;
+    iconNum('coin', s, cx + cw - sw2 - 3, cy + 2, '#8a5407', null);
+    textR(cnt, cx + cw - sw2 - 6, cy + 4, '#8a6a40', null);
+    text(fitText(it.name, cw - 26 - sw2 - textW(cnt)), cx + 17, cy + 4, '#4a3520', null);
+  });
+  if (!items.length) textC(T.empty, b.x + b.w / 2, b.cy + 6, '#8a6a40', null);
+  const by = b.cy + rows * rowH + 2;
+  if (total) {
+    button(b.cx + 2, by, b.cw - 4, 13, T.sell + '  ' + fmtN(total), 'green', () => doSell(1), 'coin');
+    button(b.cx + 2, by + 15, b.cw - 4, 13, T.sellX2 + '  ' + fmtN(total * 2), 'ad',
+      () => YSDK.showRewarded(() => doSell(2), () => {}), 'film');
+  }
+}
+function doSell(mult) {
+  let total = 0;
+  invEntries().forEach(it => { total += it.n * it.price; delete state.inv[it.key]; });
+  state.coins += total * mult;
+  Sound.coins(4); save();
+  if (state.tut === 3) setTut(4);
+  closeUI(); maybeInterstitial();
+}
+
+/* ── экран улучшений фермы ── */
+const UPG_ORDER = ['plot', 'pen', 'house'];
+function drawShopScreen() {
+  const rowH = 28;
+  const b = screenBox(T.shopTitle, UPG_ORDER.length * rowH + 2);
+  const cw = b.cw;
+  UPG_ORDER.forEach((key, i) => {
+    const u = UPG[key], lvl = state.up[key], maxed = lvl >= u.prices.length;
+    const cy = b.cy + i * rowH;
+    slab(b.cx + 1, cy, cw - 2, rowH - 2, '#e8d29c', '#c3a468', '#fbeec4');
+    spr(u.icon, b.cx + 3, cy + 4);
+    text(T.upg[key], b.cx + 21, cy + 3, '#4a3520', null);
+    text(T.upgEffect[key](Math.round(u.step * 100)), b.cx + 21, cy + 12, '#6b5636', null);
+    // ступени точками
+    for (let k = 0; k < u.prices.length; k++) {
+      ctx.fillStyle = '#2b1d12'; ctx.fillRect(b.cx + 21 + k * 8, cy + 21, 7, 4);
+      ctx.fillStyle = k < lvl ? '#5ddc6e' : '#a89474'; ctx.fillRect(b.cx + 22 + k * 8, cy + 22, 5, 2);
+    }
+    if (maxed) {
+      textR(T.maxed, b.cx + cw - 5, cy + 10, '#2f7a3c', null);
+    } else {
+      const price = u.prices[lvl], poor = state.coins < price;
+      const ps = fmtN(price), pw = iconNumW('coin', ps) + 8;
+      button(b.cx + cw - pw - 4, cy + 6, pw, 14, ps, poor ? 'grey' : 'green',
+        poor ? null : () => {
+          state.coins -= price; state.up[key]++;
+          Sound.levelUp(); save(); resize();     // дом/грядки/загон меняют вид — пересобрать сцену
+        }, 'coin');
+    }
+  });
+}
+
+/* ── экран заказов ── */
+function drawOrdersScreen() {
+  // на узкой панели кнопка не помещается сбоку — переносим её под строку
+  const wide = Math.min(LW - 6, 230) - 6 >= 150;
+  const rowH = wide ? 26 : 40;
+  const b = screenBox(T.ordersTitle, Math.max(1, state.orders.length) * rowH + 2);
+  const cw = b.cw;
+  if (!state.orders.length) { textC(T.noOrders, b.x + b.w / 2, b.cy + 8, '#8a6a40', null); return; }
+  state.orders.forEach((o, i) => {
+    const cy = b.cy + i * rowH, ready = orderReady(o);
+    slab(b.cx + 1, cy, cw - 2, rowH - 2, ready ? '#d8e8bc' : '#e8d29c', '#c3a468', '#fbeec4');
+    // требуемые предметы: иконка и «есть/надо»
+    let x = b.cx + 4;
+    for (const it of o.items) {
+      const have = state.inv[it.key] || 0;
+      spr(sprOfKey(it.key), x, cy + 2);
+      const s = have + '/' + it.n;
+      text(s, x + 1, cy + 17, have >= it.n ? '#2f7a3c' : '#a33', null);
+      x += Math.max(SW(sprOfKey(it.key)), textW(s)) + 5;
+    }
+    // на узкой строке награда встаёт в один ряд с кнопкой: у иконок и счётчиков остаётся вся ширина
+    const rs = fmtN(o.coins), rw = iconNumW('coin', rs);
+    const btnX = b.cx + 2;
+    const btnY = wide ? cy + 12 : cy + 26;
+    const btnW = wide ? 56 : cw - 8 - rw;
+    iconNum('coin', rs, b.cx + cw - rw - 5, wide ? cy + 2 : btnY, '#8a5407', null);
+    const bX = wide ? b.cx + cw - 60 : btnX;
+    if (ready) button(bX, btnY, btnW, 11, T.fulfil, 'green', () => completeOrder(i));
+    else button(bX, btnY, btnW, 11, T.reroll, 'ad', () => {
+      YSDK.showRewarded(() => {
+        const fresh = makeOrder();
+        if (fresh) state.orders[i] = fresh;
+        save();
+      }, () => {});
+    }, 'film');
+  });
+}
+
+/* ── попапы (уровень, оффлайн) ── */
+function drawPopupScreen() {
+  const p = ui;
+  const lines = p.lines || [];
+  // секции: у каждой свой заголовок и свой ряд иконок (созрело / готово)
+  const sections = p.sections || (p.chips ? [{ chips: p.chips }] : []);
+  const h = lines.length * 9 + sections.reduce((s, x) => s + (x.label ? 9 : 0) + 18, 0) + 18 + (p.adX2 ? 15 : 0);
+  const dismiss = () => { const fn = p.onClose; closeUI(); fn?.(); if (popupQueue.length) openUI(popupQueue.shift()); };
+  const b = screenBox(p.title, h, { noClose: true, onClose: dismiss });
+  let y = b.cy + 2;
+  lines.forEach(l => { textC(l, b.x + b.w / 2, y, '#4a3520', null); y += 9; });
+  for (const sec of sections) {
+    if (sec.label) { textC(sec.label, b.x + b.w / 2, y, '#6b5636', null); y += 9; }
+    const cap = c => c.label !== undefined ? c.label : '×' + c.n;
+    const tw = sec.chips.reduce((s, c) => s + SW(c.spr) + textW(cap(c)) + 6, 0);
+    let cx = b.x + Math.floor((b.w - tw) / 2);
+    for (const c of sec.chips) {
+      spr(c.spr, cx, y); text(cap(c), cx + SW(c.spr) + 1, y + 4, '#4a3520', null);
+      cx += SW(c.spr) + textW(cap(c)) + 6;
+    }
+    y += 18;
+  }
+  if (p.adX2) {   // удвоить награду за просмотр рекламы — самое конверсионное место в идлерах
+    button(b.cx + 2, y, b.cw - 4, 13, T.x2 + '  ' + fmtN(p.adX2), 'ad', () => {
+      const bonus = p.adX2;
+      p.adX2 = 0;                                          // второй раз не предлагаем
+      YSDK.showRewarded(() => { state.coins += bonus; Sound.coins(4); save(); }, () => {});
+    }, 'film');
+    y += 15;
+  }
+  button(b.x + Math.floor((b.w - 60) / 2), y + 1, 60, 13, T.ok, 'blue', dismiss);
+}
+let popupQueue = [];
+function showPopup(o) { if (ui) popupQueue.push(Object.assign({ kind: 'popup' }, o)); else openUI(Object.assign({ kind: 'popup' }, o)); }
+
+function drawUI(tm) {
+  hits = [];
+  drawHUD();
+  drawBar(tm);
+  if (!ui) drawTutorial();
+  else if (ui.kind === 'seed') drawSeedScreen();
+  else if (ui.kind === 'animals') drawAnimalScreen();
+  else if (ui.kind === 'market') drawMarketScreen();
+  else if (ui.kind === 'shop') drawShopScreen();
+  else if (ui.kind === 'orders') drawOrdersScreen();
+  else if (ui.kind === 'popup') drawPopupScreen();
+}
+
+/* ═══════════════ Игровая логика ═══════════════ */
+function gainXP(v, x, y) {
+  state.xp += v;
+  if (x !== undefined) addFloat('star', '+' + v, x, y, '#a8e8ff');
+  let leveled = false;
+  while (state.xp >= xpNeed(state.level)) { state.xp -= xpNeed(state.level); state.level++; leveled = true; }
+  if (leveled) {
+    Sound.levelUp();
+    const chips = [];
+    CROPS.forEach((c, i) => { if (c.unlock === state.level) chips.push({ spr: 'crop' + i, n: 1 }); });
+    ANIMALS.forEach((a, i) => { if (a.unlock === state.level) chips.push({ spr: 'anim' + i, n: 1 }); });
+    showPopup({ title: T.levelUp, lines: [T.level + ' ' + state.level].concat(chips.length ? [T.unlocked] : []),
+                chips, onClose: maybeInterstitial });
+  }
+  save();
+}
+/* ═══════════════ Заказы ═══════════════
+   Постоянная цель помимо уровней и денежный сток для тех, кто уже всё улучшил. */
+const priceOfKey = k => k[0] === 'c' ? sellCrop(+k.slice(1)) : sellProd(+k.slice(1));
+const sprOfKey = k => (k[0] === 'c' ? 'crop' : 'prod') + k.slice(1);
+const nameOfKey = k => k[0] === 'c' ? T.crops[+k.slice(1)] : T.products[+k.slice(1)];
+
+function makeOrder() {
+  const pool = [];
+  CROPS.forEach((c, i) => { if (c.unlock <= state.level) pool.push('c' + i); });
+  // продукты просим только у тех животных, которые у игрока есть — иначе заказ невыполним
+  ANIMALS.forEach((a, i) => { if (state.animals.some(x => x.id === i)) pool.push('p' + i); });
+  if (!pool.length) return null;
+  const want = 1 + Math.floor(Math.random() * Math.min(3, pool.length));
+  const items = [], used = {};
+  for (let k = 0; k < want * 3 && items.length < want; k++) {
+    const key = pool[Math.floor(Math.random() * pool.length)];
+    if (used[key]) continue;
+    used[key] = 1;
+    // продукты животных идут медленно (до получаса за штуку) — их просим меньше, чем урожая
+    items.push({ key, n: key[0] === 'p' ? 1 + Math.floor(Math.random() * 2) : 2 + Math.floor(Math.random() * 4) });
+  }
+  const value = items.reduce((s, it) => s + it.n * priceOfKey(it.key), 0);
+  return { items, coins: Math.round(value * ORDER_REWARD_MULT), xp: Math.max(5, Math.round(value / 12)) };
+}
+function refillOrders() {
+  if (!Array.isArray(state.orders)) state.orders = [];
+  while (state.orders.length < ORDER_SLOTS) {
+    const o = makeOrder();
+    if (!o) break;
+    state.orders.push(o);
+  }
+}
+const orderReady = o => o.items.every(it => (state.inv[it.key] || 0) >= it.n);
+function completeOrder(idx) {
+  const o = state.orders[idx];
+  if (!o || !orderReady(o)) { Sound.error(); return; }
+  o.items.forEach(it => {
+    state.inv[it.key] -= it.n;
+    if (state.inv[it.key] <= 0) delete state.inv[it.key];
+  });
+  state.coins += o.coins;
+  Sound.coins(4);
+  state.orders.splice(idx, 1);
+  refillOrders();
+  gainXP(o.xp);
+  save();
+}
+
+/* ═══════════════ Ежедневный бонус ═══════════════ */
+function checkDaily() {
+  const d = dayIndex(now());
+  if (state.daily.day === d) return;                       // сегодня уже получал
+  state.daily.streak = state.daily.day === d - 1 ? Math.min(DAILY_MAX_STREAK, state.daily.streak + 1) : 1;
+  state.daily.day = d;
+  const reward = Math.round(40 * state.level * (1 + .25 * (state.daily.streak - 1)));
+  state.coins += reward;
+  save();
+  showPopup({ title: T.dailyTitle, lines: [T.dailyStreak(state.daily.streak)],
+              sections: [{ chips: [{ spr: 'coin', label: '+' + fmtN(reward) }] }],
+              adX2: reward });                             // кнопка «×2 за рекламу»
+}
+
+let bootAt = 0;
+function maybeInterstitial() {
+  const t = now();
+  if (t - state.adsAt < 3 * MIN || t - bootAt < MIN) return;
+  state.adsAt = t; save();
+  YSDK.showInterstitial(() => {});
+}
+function setTut(step) { state.tut = step; save(); }
+
+function onWorldTap(lx, ly) {
+  const tm = now();
+  const inside = r => lx >= r.x && lx < r.x + r.w && ly >= r.y && ly < r.y + r.h;
+
+  for (let i = 0; i < ANIMAL_SLOTS; i++) {
+    const s = L.slots[i];
+    if (!inside(s)) continue;
+    const a = state.animals[i], cx = s.x + s.w / 2;
+    if (a.id < 0) {
+      if (ANIMALS.some(an => an.unlock <= state.level)) openUI({ kind: 'animals', slot: i });
+      else { Sound.error(); addFloat('lock', String(ANIMALS[0].unlock), cx, s.y, '#ff9a86'); }
+      return;
+    }
+    const spec = ANIMALS[a.id];
+    if (animReady(a, tm)) {
+      a.fedAt = 0;
+      state.inv['p' + a.id] = (state.inv['p' + a.id] || 0) + 1;
+      Sound.collect(); addSparks(cx, s.y + s.h / 2); addFly('prod' + a.id, cx - 7, s.y + 6);
+      gainXP(spec.xp, cx, s.y);
+      save();
+    } else if (animBusy(a, tm)) {
+      addFloat('clk', clockStr(prodMs(a.id) - (tm - a.fedAt)), cx, s.y, '#fff6dd');
+    } else {
+      const key = 'c' + spec.feed;
+      if ((state.inv[key] || 0) > 0) {
+        state.inv[key]--; if (!state.inv[key]) delete state.inv[key];
+        a.fedAt = tm; Sound.feed(); save();
+      } else { Sound.error(); addFloat(miniFeed(spec.feed), '×', cx, s.y, '#ff9a86'); }
+    }
+    return;
+  }
+
+  const owned = state.plots.length;
+  for (let i = 0; i < Math.min(owned + 1, MAX_PLOTS); i++) {
+    const r = L.plots[i];
+    if (!inside(r)) continue;
+    const cx = r.x + TILE / 2;
+    if (i === owned) {
+      const price = PLOT_PRICES[i];
+      if (state.coins >= price) {
+        state.coins -= price;
+        state.plots.push({ c: -1, at: 0, wet: 0 });
+        Sound.buy(); addSparks(cx, r.y + TILE / 2); save();
+        resize();                                            // поле подросло — пересобрать сцену
+      } else { Sound.error(); addFloat('coin', fmtN(price), cx, r.y, '#ff9a86'); }
+      return;
+    }
+    const p = state.plots[i];
+    if (p.c < 0) { openUI({ kind: 'seed', plot: i }); return; }
+    if (plotReady(p, tm)) {
+      const c = CROPS[p.c];
+      state.inv['c' + p.c] = (state.inv['c' + p.c] || 0) + 1;
+      addSparks(cx, r.y + TILE / 2); addFly('crop' + p.c, r.x, r.y);
+      Sound.harvest();
+      gainXP(c.xp, cx, r.y);
+      state.plots[i] = { c: -1, at: 0, wet: 0 };
+      save();
+      if (state.tut === 1 || state.tut === 2) setTut(3);
+      return;
+    }
+    // растёт: полив бесплатный, но один раз на грядку. Никаких цифр — только лейка и капли
+    if (!p.wet) {
+      p.at -= plotLeft(p, tm) * WATER_CUT; p.wet = 1;
+      Sound.water(); addDrops(cx, r.y + 6); addPop('can', cx - 7, r.y - 10);
+      save();
+      if (state.tut === 1) setTut(2);
+    }
+    return;
+  }
+}
+
+screenCv.addEventListener('pointerdown', e => {
+  Sound.unlock();
+  const r = screenCv.getBoundingClientRect();
+  const lx = Math.floor((e.clientX - r.left) / r.width * LW);
+  const ly = Math.floor((e.clientY - r.top) / r.height * LH);
+  for (let i = hits.length - 1; i >= 0; i--) {                // верхние области перекрывают нижние
+    const h = hits[i];
+    if (lx >= h.x && lx < h.x + h.w && ly >= h.y && ly < h.y + h.h) {
+      pressed = { x: h.x, y: h.y, w: h.w, h: h.h, at: animT };
+      if (h.w < LW) Sound.tap();                                 // тап мимо окна озвучит closeUI
+      h.fn(); return;
+    }
+  }
+  if (!ui) onWorldTap(lx, ly);
+});
+
+/* ═══════════════ Кадр ═══════════════ */
+let lastT = 0, readySignaled = false;
+function frame(t) {
+  const dt = Math.min((t - lastT) / 1000, .05); lastT = t; animT += dt;
+  if (LW < 1 || LH < 1) { requestAnimationFrame(frame); return; }   // окно ещё не имеет размера
+  const tm = now(), F4 = Math.floor(animT * 4), F8 = Math.floor(animT * 8);
+  drawWorld(dt, tm, F4, F8);
+  const ph = dayPhase(tm), tone = dayTone(ph);
+  if (tone) {                                                  // тон дня одним умножением на весь мир
+    ctx.globalCompositeOperation = 'multiply'; ctx.fillStyle = tone; ctx.fillRect(0, 0, LW, LH);
+    ctx.globalCompositeOperation = 'source-over';
+  }
+  drawNight(ph, F8);
+  if (vign) ctx.drawImage(vign, 0, 0);
+  drawUI(tm);
+  sctx.drawImage(buf, 0, 0, LW, LH, 0, 0, LW * S, LH * S);    // вывод целым множителем
+  if (!readySignaled) { readySignaled = true; YSDK.gameReady(); YSDK.gameplayStart(); }
+  requestAnimationFrame(frame);
+}
+
+/* ═══════════════ Запуск ═══════════════ */
+document.addEventListener('contextmenu', e => e.preventDefault());
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) { dirty = true; flushSave(); YSDK.gameplayStop(); }
+  else if (!ui) YSDK.gameplayStart();
+});
+
+(async function main() {
+  await YSDK.init();
+  T = I18N[YSDK.lang === 'ru' ? 'ru' : 'en'] || I18N.en;
+  document.title = T.title;
+  buildFont(); buildSprites();
+  await loadGame();
+  bootAt = now();
+  resize();
+  buildDither();
+
+  refillOrders();
+
+  const sum = offlineSummary();
+  if (sum) {
+    const sections = [];
+    const ripe = Object.entries(sum.ripe), made = Object.entries(sum.made);
+    let value = 0;
+    if (ripe.length) {
+      sections.push({ label: T.ripened, chips: ripe.map(([i, n]) => ({ spr: 'crop' + i, n })) });
+      ripe.forEach(([i, n]) => { value += sellCrop(+i) * n; });
+    }
+    if (made.length) {
+      sections.push({ label: T.producedT, chips: made.map(([i, n]) => ({ spr: 'prod' + i, n })) });
+      made.forEach(([i, n]) => { value += sellProd(+i) * n; });
+    }
+    // «×2 за рекламу» — удваиваем ценность того, что вызрело без игрока
+    showPopup({ title: T.offline, sections, adX2: value > 0 ? value : 0 });
+  }
+  checkDaily();
+  requestAnimationFrame(t => { lastT = t; frame(t); });
+})();
+
+</script>
+</body>
+</html>

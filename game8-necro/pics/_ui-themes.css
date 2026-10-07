@@ -1,0 +1,103 @@
+/* Темы интерфейса для примерки (черновик, не часть игры). Общие для _ui-directions и _ui-real. */
+
+  body { margin: 0; background: #07060a; color: #c9c2b4; font: 13px/1.4 system-ui, sans-serif; }
+  header { padding: 12px 18px; border-bottom: 1px solid #2a2220; }
+  h1 { margin: 0; font-size: 16px; color: #e6dcc0; }
+  .sub { color: #8a8070; font-size: 12px; }
+  .wrap { display: flex; gap: 22px; padding: 16px 18px; flex-wrap: wrap; align-items: flex-start; }
+  .col { width: 300px; }
+  .cap { font-size: 15px; font-weight: 700; color: #e6dcc0; margin-bottom: 2px; }
+  .cap small { display: block; font-weight: 400; color: #8a8070; font-size: 12px; margin: 2px 0 8px; }
+  img.px { image-rendering: pixelated; display: block; }
+  .scene { height: 70px; border-radius: 3px; margin-bottom: 8px;
+    background: radial-gradient(ellipse at 30% 70%, #3a2e1c 0%, #1a1412 45%, #0a0810 100%); position: relative; overflow: hidden; }
+  .scene img { position: absolute; bottom: 4px; width: 48px; height: 48px; }
+
+  /* ═══ общая разметка ═══ */
+  .ui { display: flex; flex-direction: column; gap: 8px; }
+  .hud { display: flex; align-items: center; gap: 6px; padding: 6px 8px; }
+  .hud .tier { min-width: 0; white-space: nowrap; }
+  .hud .bust { width: 40px; height: 40px; }
+  .hud .tier { flex: 1; }
+  .pips { display: flex; gap: 3px; margin-top: 3px; }
+  .pips i { width: 9px; height: 9px; display: block; transform: rotate(45deg); }
+  .res { display: flex; gap: 4px; flex: 0 0 auto; }
+  .res span { display: flex; align-items: center; gap: 1px; }
+  .res img { width: 18px; height: 18px; }
+  .blk { padding: 8px; }
+  .blk h3 { margin: 0 0 6px; }
+  .army { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+  .slot { aspect-ratio: 1 / 1.15; position: relative; display: flex; align-items: flex-end; justify-content: center; }
+  .slot img { width: 64px; height: 64px; }
+  .slot .hp { position: absolute; left: 4px; right: 4px; bottom: 4px; height: 4px; }
+  .slot .hp b { display: block; height: 100%; }
+  .slot .st { position: absolute; top: 3px; right: 5px; font-size: 10px; }
+  .spells { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+  .spell { display: flex; flex-direction: column; align-items: center; gap: 3px; padding: 6px 2px; position: relative; cursor: pointer; }
+  .spell img { width: 40px; height: 40px; }
+  .spell.cd img { filter: grayscale(1) brightness(.45); }
+  .spell .cdn { position: absolute; top: 14px; font-size: 18px; }
+  .spell span { font-size: 11px; text-align: center; line-height: 1.1; }
+  .circle { display: flex; justify-content: center; gap: 10px; margin: 4px 0 8px; }
+  .sock { width: 46px; height: 46px; display: flex; align-items: center; justify-content: center; }
+  .sock img { width: 36px; height: 36px; }
+  .stock { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; }
+  .pile { display: flex; flex-direction: column; align-items: center; padding: 4px 0; }
+  .pile img { width: 32px; height: 32px; }
+  .pile .d { display: flex; gap: 4px; font-size: 11px; margin-top: 2px; }
+  .row { display: flex; gap: 6px; margin-top: 8px; }
+  .btn { flex: 1; text-align: center; padding: 7px 4px; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 5px; }
+  .btn img { width: 20px; height: 20px; }
+  .big { margin-top: 8px; padding: 9px; text-align: center; font-size: 16px; cursor: pointer; }
+  .banner { padding: 8px 10px; text-align: center; }
+
+  /* ═══ A · Каменная плита (Diablo II) ═══ */
+  .A { font-family: 'Pixelify Sans', sans-serif; color: #d8ccb0; }
+  .A .hud, .A .blk, .A .banner { background: linear-gradient(#2a2420, #1a1614); border: 2px solid #0e0b0a; box-shadow: inset 1px 1px 0 #4a3e34, inset -1px -1px 0 #0a0807, 0 2px 0 #000; }
+  .A h3 { font: 600 13px 'Pixelify Sans'; color: #c8a35a; letter-spacing: .08em; text-transform: uppercase; text-shadow: 0 1px 0 #000; }
+  .A .tier { font-size: 14px; color: #e6dcc0; }
+  .A .pips i { background: #3f8f5c; } .A .pips i.off { background: #241d1c; outline: 1px solid #4a3e34; } .A .pips i.boss { background: #a8262a; }
+  .A .res span { font-size: 13px; }
+  .A .slot, .A .sock, .A .pile, .A .spell { background: #110e0d; border: 1px solid #000; box-shadow: inset 2px 2px 0 #000, inset -1px -1px 0 #3a2e2b; }
+  .A .slot .hp { background: #2a0a0d; } .A .slot .hp b { background: #a8262a; }
+  .A .slot .st { color: #c8a35a; }
+  .A .spell span { color: #d8ccb0; } .A .spell .cdn { color: #e6dcc0; text-shadow: 0 0 3px #000; }
+  .A .spell.ready { box-shadow: inset 0 0 0 1px #3f8f5c, inset 0 0 12px #1e3a2a; }
+  .A .btn { background: linear-gradient(#4a3e34, #2a2420); border: 1px solid #000; box-shadow: inset 1px 1px 0 #6b564e; color: #e6dcc0; font-size: 12px; }
+  .A .big { background: linear-gradient(#3f6b2e, #1e3a1a); border: 2px solid #000; box-shadow: inset 1px 1px 0 #8dbb5a, 0 0 10px #1e3a2a; color: #e8ffd8; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; }
+  .A .pile .d { color: #a89878; }
+  .A .banner { color: #e6dcc0; font-size: 14px; }
+
+  /* ═══ B · Тёмный гримуар (Darkest Dungeon) ═══ */
+  .B { font-family: 'Cormorant SC', serif; color: #d9cdb2; }
+  .B .hud, .B .blk, .B .banner { background: #0e0c0e; border: 1px solid #6b5a3a; outline: 1px solid #000; outline-offset: -4px; box-shadow: 0 0 0 3px #0e0c0e, 0 0 0 4px #3a3022, 0 4px 12px #000; }
+  .B h3 { font: 700 15px 'Cormorant SC'; color: #c9a86a; letter-spacing: .12em; text-align: center; border-bottom: 1px solid #3a3022; padding-bottom: 4px; }
+  .B .tier { font-size: 18px; font-weight: 700; color: #e9dcbc; }
+  .B .pips i { background: #8a7040; width: 8px; height: 8px; } .B .pips i.off { background: transparent; outline: 1px solid #6b5a3a; } .B .pips i.boss { background: #8a1a1a; outline: 1px solid #c9a86a; }
+  .B .res span { font: 700 15px 'Cormorant SC'; }
+  .B .slot, .B .sock, .B .pile, .B .spell { background: radial-gradient(ellipse at 50% 40%, #1c1714, #080708); border: 1px solid #3a3022; }
+  .B .slot .hp { background: #1a0606; border: 1px solid #3a3022; height: 5px; } .B .slot .hp b { background: linear-gradient(#c23a2a, #6a1010); }
+  .B .slot .st { color: #c9a86a; }
+  .B .spell span { font-size: 13px; font-weight: 700; } .B .spell .cdn { color: #e9dcbc; font: 700 22px 'Cormorant SC'; text-shadow: 0 0 4px #000; }
+  .B .spell.ready { border-color: #c9a86a; box-shadow: inset 0 0 14px #2a2010; }
+  .B .btn { background: #15110e; border: 1px solid #6b5a3a; color: #d9cdb2; font: 700 14px 'Cormorant SC'; }
+  .B .big { background: linear-gradient(#2a1f12, #120d08); border: 1px solid #c9a86a; color: #f0dca8; font: 700 19px 'Cormorant SC'; letter-spacing: .14em; box-shadow: 0 0 14px #3a2a10; }
+  .B .pile .d { font-size: 13px; color: #a8987a; }
+  .B .banner { font: 700 17px 'Cormorant SC'; color: #e9dcbc; }
+
+  /* ═══ C · Рогалик DCSS ═══ */
+  .C { font-family: 'Tiny5', monospace; color: #c0c0c0; }
+  .C .hud, .C .blk, .C .banner { background: #000; border: 1px solid #5a5a5a; }
+  .C h3 { font: 400 12px 'Tiny5'; color: #7fbf7f; text-transform: uppercase; }
+  .C .tier { font-size: 14px; color: #fff; }
+  .C .pips i { transform: none; width: 8px; height: 8px; background: #7fbf7f; } .C .pips i.off { background: #222; } .C .pips i.boss { background: #d04040; }
+  .C .res span { font-size: 13px; color: #fff; }
+  .C .slot, .C .sock, .C .pile, .C .spell { background: #0c0c0c; border: 1px solid #333; }
+  .C .slot .hp { background: #400; height: 3px; } .C .slot .hp b { background: #d04040; }
+  .C .slot .st { color: #ff0; }
+  .C .spell span { font-size: 11px; } .C .spell .cdn { color: #fff; font: 18px 'Tiny5'; }
+  .C .spell.ready { border-color: #7fbf7f; }
+  .C .btn { background: #111; border: 1px solid #5a5a5a; color: #fff; font: 12px 'Tiny5'; }
+  .C .big { background: #0a2a0a; border: 1px solid #7fbf7f; color: #bfffbf; font: 16px 'Tiny5'; }
+  .C .pile .d { color: #aaa; }
+  .C .banner { color: #fff; font-size: 13px; }

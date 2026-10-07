@@ -1,0 +1,1768 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Алхимия: Лавка зелий — прототип v3</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { height: 100%; overflow: hidden; background: #1a1424; }
+  body { user-select: none; -webkit-user-select: none; }
+  #game {
+    position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%);
+    touch-action: none; display: block;
+    image-rendering: pixelated; image-rendering: crisp-edges;
+  }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<script src="../shared/sfx.js"></script>
+<script>
+/* ═══════════════════════════════════════════════════════════════════════════════
+   ПРОТОТИП игры №6 «Алхимия: Лавка зелий». Версия 2.
+   Спека: docs/superpowers/specs/2026-08-10-alchemy-shop-design.md
+
+   Цель прототипа — пощупать ощущение цикла: смешивание → открытие → варка →
+   полка → заказ → отчёт. Здесь НЕТ рекламы, покупок, i18n, сейва, туториала,
+   мебели и подмастерьев — они в спеке, но не тут.
+
+   Отличие от релизной сборки: иконки элементов собраны из девяти форм с подменой
+   палитры, а не нарисованы по отдельности. В релизе их 140 уникальных. Приём с
+   подменой палитры тот же, которым будут делаться скины лавки.
+
+   v2 (2026-08-12) — правки «дороговизны» поверх замороженного prototype.html (v1):
+   звук через shared/sfx.js (эффекты, музыка alchemy/dawn, эмбиент очага),
+   анти-клоны в очереди и тональные варианты покупателей, окно и свеча в портрете,
+   мелочёвка на стене, вывеска-кнопка, дуга монет к кошельку, одноразовый «×2»,
+   полная страница зелья в портретном журнале, свайп палитры.
+
+   v3 (2026-09-03) — выводы симулятора экономики и дешёвая «дороговизна»:
+   ДНЁМ ЗЕЛЬЯ НЕ ВАРЯТСЯ (открывать можно, склянки ждут ночи) — без этого правила
+   идл-контур экономически мёртв, см. docs/superpowers/sim/alchemy-economy.js;
+   спрос растёт с ассортиментом; сейв в localStorage и оффлайн-варка полок по
+   таймстампам с попапом возвращения; покупка полок; подсказка-заглушка в журнале;
+   дизер-переход дня и ночи; покупатели приходят и уходят, дышат, стоят за стойкой;
+   склянки светятся ночью; счётчик монет докручивается; очаг днём тлеет; звездопад.
+   История версий — CHANGELOG.md рядом.
+   ═══════════════════════════════════════════════════════════════════════════════ */
+
+/* если sfx.js не подгрузился (открыли файлом с диска) — игра не должна падать */
+if (typeof SFX === 'undefined') window.SFX = { music: { start() {}, stop() {} },
+  amb: { start() {}, stop() {}, playing: () => false }, setMuted() {}, tap() {},
+  water() {}, spell() {}, drop() {}, reveal() {}, bell() {}, error() {}, coins() {},
+  open() {}, close() {}, bubble() {}, toggle() {}, select() {} };
+
+/* ═══════════════ Пиксельный конвейер (движок фермы) ═══════════════
+   Всё рисуется в буфер 1:1 и выводится целым множителем S без сглаживания. */
+const screenCv = document.getElementById('game');
+const sctx = screenCv.getContext('2d');
+const buf = document.createElement('canvas');
+const ctx = buf.getContext('2d');
+let S = 4, LW = 320, LH = 180;
+
+function mk(rows, pal) {
+  const w = Math.max(...rows.map(r => r.length)), h = rows.length;
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  const x = c.getContext('2d');
+  rows.forEach((row, y) => {
+    for (let i = 0; i < row.length; i++) { const col = pal[row[i]]; if (col) { x.fillStyle = col; x.fillRect(i, y, 1, 1); } }
+  });
+  return c;
+}
+function outline(src, col = '#160f1f') {
+  const w = src.width + 2, h = src.height + 2;
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  const x = c.getContext('2d');
+  x.drawImage(src, 1, 1);
+  const d = x.getImageData(0, 0, w, h), a = d.data;
+  const solid = (i, j) => i >= 0 && j >= 0 && i < w && j < h && a[(j * w + i) * 4 + 3] > 0;
+  x.fillStyle = col;
+  for (let j = 0; j < h; j++) for (let i = 0; i < w; i++)
+    if (a[(j * w + i) * 4 + 3] === 0 && (solid(i + 1, j) || solid(i - 1, j) || solid(i, j + 1) || solid(i, j - 1)))
+      x.fillRect(i, j, 1, 1);
+  return c;
+}
+const SPRITES = {};
+const SW = n => SPRITES[n].width, SH = n => SPRITES[n].height;
+function spr(name, x, y) { ctx.drawImage(SPRITES[name], Math.round(x), Math.round(y)); }
+
+/* ═══════════════ Битмап-шрифт 5×7 ═══════════════ */
+const GLYPHS = {
+  A: '.###.|#...#|#...#|#####|#...#|#...#|#...#',
+  B: '####.|#...#|#...#|####.|#...#|#...#|####.',
+  C: '.####|#....|#....|#....|#....|#....|.####',
+  D: '####.|#...#|#...#|#...#|#...#|#...#|####.',
+  E: '#####|#....|#....|####.|#....|#....|#####',
+  F: '#####|#....|#....|####.|#....|#....|#....',
+  G: '.####|#....|#....|#..##|#...#|#...#|.###.',
+  H: '#...#|#...#|#...#|#####|#...#|#...#|#...#',
+  I: '#####|..#..|..#..|..#..|..#..|..#..|#####',
+  J: '....#|....#|....#|....#|#...#|#...#|.###.',
+  K: '#...#|#..#.|#.#..|##...|#.#..|#..#.|#...#',
+  L: '#....|#....|#....|#....|#....|#....|#####',
+  M: '#...#|##.##|#.#.#|#.#.#|#...#|#...#|#...#',
+  N: '#...#|##..#|#.#.#|#.#.#|#..##|#...#|#...#',
+  O: '.###.|#...#|#...#|#...#|#...#|#...#|.###.',
+  P: '####.|#...#|#...#|####.|#....|#....|#....',
+  Q: '.###.|#...#|#...#|#...#|#.#.#|#..#.|.##.#',
+  R: '####.|#...#|#...#|####.|#.#..|#..#.|#...#',
+  S: '.####|#....|#....|.###.|....#|....#|####.',
+  T: '#####|..#..|..#..|..#..|..#..|..#..|..#..',
+  U: '#...#|#...#|#...#|#...#|#...#|#...#|.###.',
+  V: '#...#|#...#|#...#|#...#|#...#|.#.#.|..#..',
+  W: '#...#|#...#|#...#|#.#.#|#.#.#|##.##|#...#',
+  X: '#...#|#...#|.#.#.|..#..|.#.#.|#...#|#...#',
+  Y: '#...#|#...#|.#.#.|..#..|..#..|..#..|..#..',
+  Z: '#####|....#|...#.|..#..|.#...|#....|#####',
+  'Б': '####.|#....|#....|####.|#...#|#...#|####.',
+  'Г': '#####|#....|#....|#....|#....|#....|#....',
+  'Д': '.####|.#..#|.#..#|.#..#|.#..#|#####|#...#',
+  'Ж': '#.#.#|#.#.#|#.#.#|#####|#.#.#|#.#.#|#.#.#',
+  'З': '####.|....#|....#|.###.|....#|....#|####.',
+  'И': '#...#|#...#|#..##|#.#.#|##..#|#...#|#...#',
+  'Й': '.###.|#...#|#..##|#.#.#|##..#|#...#|#...#',
+  'Л': '..###|.##.#|.#..#|.#..#|.#..#|.#..#|#...#',
+  'П': '#####|#...#|#...#|#...#|#...#|#...#|#...#',
+  'У': '#...#|#...#|#...#|.####|....#|#...#|.###.',
+  'Ф': '..#..|.###.|#.#.#|#.#.#|#.#.#|.###.|..#..',
+  'Ц': '#..#.|#..#.|#..#.|#..#.|#..#.|#####|....#',
+  'Ч': '#...#|#...#|#...#|.####|....#|....#|....#',
+  'Ш': '#.#.#|#.#.#|#.#.#|#.#.#|#.#.#|#.#.#|#####',
+  'Щ': '#.#.#|#.#.#|#.#.#|#.#.#|#.#.#|#####|....#',
+  'Ъ': '##...|.#...|.#...|.###.|.#..#|.#..#|.###.',
+  'Ы': '#...#|#...#|##..#|#.#.#|#.#.#|#.#.#|##..#',
+  'Ь': '#....|#....|#....|####.|#...#|#...#|####.',
+  'Э': '####.|....#|....#|.####|....#|....#|####.',
+  'Ю': '#.##.|#.#.#|#.#.#|###.#|#.#.#|#.#.#|#.##.',
+  'Я': '.####|#...#|#...#|.####|..#.#|.#..#|#...#',
+  '0': '.###.|#...#|#..##|#.#.#|##..#|#...#|.###.',
+  '1': '..#..|.##..|..#..|..#..|..#..|..#..|.###.',
+  '2': '.###.|#...#|....#|...#.|..#..|.#...|#####',
+  '3': '#####|...#.|..##.|....#|....#|#...#|.###.',
+  '4': '...#.|..##.|.#.#.|#..#.|#####|...#.|...#.',
+  '5': '#####|#....|####.|....#|....#|#...#|.###.',
+  '6': '..##.|.#...|#....|####.|#...#|#...#|.###.',
+  '7': '#####|....#|...#.|..#..|.#...|.#...|.#...',
+  '8': '.###.|#...#|#...#|.###.|#...#|#...#|.###.',
+  '9': '.###.|#...#|#...#|.####|....#|...#.|.##..',
+  '.': '.....|.....|.....|.....|.....|.##..|.##..',
+  ',': '.....|.....|.....|.....|.##..|.##..|.#...',
+  ':': '.....|.##..|.##..|.....|.##..|.##..|.....',
+  '!': '..#..|..#..|..#..|..#..|..#..|.....|..#..',
+  '?': '.###.|#...#|....#|...#.|..#..|.....|..#..',
+  '-': '.....|.....|.....|#####|.....|.....|.....',
+  '+': '.....|..#..|..#..|#####|..#..|..#..|.....',
+  '=': '.....|.....|#####|.....|#####|.....|.....',
+  '/': '....#|....#|...#.|..#..|.#...|#....|#....',
+  '(': '...#.|..#..|.#...|.#...|.#...|..#..|...#.',
+  ')': '.#...|..#..|...#.|...#.|...#.|..#..|.#...',
+  '×': '.....|#...#|.#.#.|..#..|.#.#.|#...#|.....',
+  '→': '.....|..#..|...#.|#####|...#.|..#..|.....',
+  '?!': '.....|.....|.....|.....|.....|.....|.....',
+};
+Object.assign(GLYPHS, {
+  'А': GLYPHS.A, 'В': GLYPHS.B, 'Е': GLYPHS.E, 'Ё': GLYPHS.E, 'К': GLYPHS.K, 'М': GLYPHS.M,
+  'Н': GLYPHS.H, 'О': GLYPHS.O, 'Р': GLYPHS.P, 'С': GLYPHS.C, 'Т': GLYPHS.T, 'Х': GLYPHS.X,
+});
+const FONT = {};
+const FONT_H = 7, SPACE_W = 3, LETTER_SP = 1;
+function buildFont() {
+  for (const ch in GLYPHS) {
+    const rows = GLYPHS[ch].split('|');
+    if (rows.length !== FONT_H) continue;
+    let lo = 5, hi = -1;
+    for (let c = 0; c < 5; c++) for (let r = 0; r < FONT_H; r++)
+      if (rows[r][c] === '#') { if (c < lo) lo = c; if (c > hi) hi = c; }
+    if (hi < 0) { FONT[ch] = { rows: [], w: SPACE_W }; continue; }
+    FONT[ch] = { rows: rows.map(r => r.slice(lo, hi + 1)), w: hi - lo + 1 };
+  }
+  FONT[' '] = { rows: [], w: SPACE_W };
+}
+function textW(s) {
+  s = String(s).toUpperCase();
+  let w = 0;
+  for (const ch of s) { const g = FONT[ch] || FONT[' ']; w += g.w + LETTER_SP; }
+  return Math.max(0, w - LETTER_SP);
+}
+function paintText(s, x, y, col) {
+  ctx.fillStyle = col;
+  let cx = x;
+  for (const ch of String(s).toUpperCase()) {
+    const g = FONT[ch] || FONT[' '];
+    for (let r = 0; r < g.rows.length; r++) {
+      const row = g.rows[r];
+      for (let c = 0; c < row.length; c++) if (row[c] === '#') ctx.fillRect(cx + c, y + r, 1, 1);
+    }
+    cx += g.w + LETTER_SP;
+  }
+}
+function text(s, x, y, col, shadow = '#160f1f') {
+  x = Math.round(x); y = Math.round(y);
+  if (shadow) paintText(s, x + 1, y + 1, shadow);
+  paintText(s, x, y, col);
+}
+const textC = (s, cx, y, col, sh) => text(s, Math.round(cx - textW(s) / 2), y, col, sh);
+const textR = (s, rx, y, col, sh) => text(s, Math.round(rx - textW(s)), y, col, sh);
+function fitText(s, maxW) {
+  s = String(s);
+  if (textW(s) <= maxW) return s;
+  while (s.length > 1 && textW(s + '.') > maxW) s = s.slice(0, -1);
+  return s + '.';
+}
+function wrapText(s, maxW) {
+  const words = String(s).split(' '), lines = [];
+  let cur = '';
+  for (const wd of words) {
+    const t = cur ? cur + ' ' + wd : wd;
+    if (textW(t) > maxW && cur) { lines.push(cur); cur = wd; } else cur = t;
+  }
+  if (cur) lines.push(cur);
+  return lines;
+}
+
+/* ═══════════════ Формы иконок элементов ═══════════════
+   Девять форм 12×12; цвет берётся из палитры элемента (a — основной, b — тень,
+   c — блик). В релизе каждый из 140 элементов получит свой спрайт.            */
+const SHAPES = {
+  drop: [
+    '.....aa.....', '.....aa.....', '....acca....', '....acca....',
+    '...aaccaa...', '...aaccaa...', '..aaaccaaa..', '..aaaaaaaa..',
+    '..aaaaaaaa..', '...aaaaaa...', '....abba....', '.....bb.....',
+  ],
+  flame: [
+    '.....a......', '....aa......', '....aca.....', '...aacaa....',
+    '...aacaa....', '..aaacaaa...', '..aaacaaa...', '..aaaaaaa...',
+    '..aabaaba...', '...abbba....', '....bbb.....', '............',
+  ],
+  clod: [
+    '............', '............', '...aaaa.....', '..aacaaa....',
+    '.aaacaaaaa..', '.aaaaaaaaa..', 'aaaaaaaaaaa.', 'aaaabaaaaba.',
+    '.abaaabaaa..', '..bbbbbbbb..', '............', '............',
+  ],
+  swirl: [
+    '............', '...aaaaa....', '..a.....a...', '.a...aaa.a..',
+    'a...a...a.a.', 'a..a.....aa.', 'a..a....aa..', '.a..a..aa...',
+    '..a..aaa....', '...aa.......', '....bbbb....', '............',
+  ],
+  rock: [
+    '............', '.....aaa....', '....acaaa...', '...aacaaaa..',
+    '..aaacaaaaa.', '..aaaaaaaaa.', '.aaaaaaaaaa.', '.aaabaaaaba.',
+    '.abaaabaaaa.', '..bbbbbbbb..', '............', '............',
+  ],
+  leaf: [
+    '..........a.', '.........aa.', '.......aaca.', '.....aaacaa.',
+    '...aaaacaa..', '..aaaacaa...', '..aaacaa....', '..aacaa.....',
+    '..aaaa......', '.baa........', '.b..........', '.b..........',
+  ],
+  mush: [
+    '............', '...aaaaa....', '..aacccaa...', '.aaacccaaa..',
+    '.aaaaaaaaa..', '..bbbbbbb...', '....ccc.....', '....ccc.....',
+    '....ccc.....', '....bbb.....', '............', '............',
+  ],
+  pot: [
+    '............', '...bbbbbb...', '..b......b..', '..aaaaaaaa..',
+    '.aaaaaaaaaa.', '.aacaaaaaaa.', '.aacaaaaaaa.', '.aaaaaaaaaa.',
+    '..aaaaaaaa..', '...aaaaaa...', '....bbbb....', '............',
+  ],
+  vial: [
+    '....bbbb....', '....b..b....', '....b..b....', '...baaab....',
+    '..baaaaab...', '..bacaaab...', '..bacaaab...', '..baaaaab...',
+    '..baaaaab...', '...baaab....', '....bbb.....', '............',
+  ],
+};
+
+/* ═══════════════ Дерево рецептов прототипа: 24 узла ═══════════════ */
+const EL = {
+  water: { n: 'Вода',   s: 'drop',  p: ['#3f8ecc', '#22587f', '#a9dcf5'], kind: 'base' },
+  fire:  { n: 'Огонь',  s: 'flame', p: ['#e8642a', '#98330f', '#ffd36b'], kind: 'base' },
+  earth: { n: 'Земля',  s: 'clod',  p: ['#7a5230', '#4a2f19', '#a8794a'], kind: 'base' },
+  air:   { n: 'Воздух', s: 'swirl', p: ['#cfd6e8', '#7b8399', '#ffffff'], kind: 'base' },
+
+  steam: { n: 'Пар',    s: 'swirl', p: ['#bcd8e8', '#6f8a99', '#ffffff'] },
+  clay:  { n: 'Глина',  s: 'clod',  p: ['#b06b46', '#6d3d25', '#d99a70'] },
+  dew:   { n: 'Роса',   s: 'drop',  p: ['#8fd8e0', '#458a92', '#dbfbff'] },
+  lava:  { n: 'Лава',   s: 'rock',  p: ['#e05a1e', '#8f2c08', '#ffc24a'] },
+  smoke: { n: 'Дым',    s: 'swirl', p: ['#8b8798', '#565266', '#c4c0cf'] },
+  dust:  { n: 'Пыль',   s: 'clod',  p: ['#cbb98f', '#8a7a56', '#eee0be'] },
+  pot:   { n: 'Горшок', s: 'pot',   p: ['#a9633c', '#66351d', '#d18e5f'] },
+  fog:   { n: 'Туман',  s: 'swirl', p: ['#dfe6ef', '#98a1af', '#ffffff'] },
+  mud:   { n: 'Грязь',  s: 'clod',  p: ['#5e4526', '#382712', '#856334'] },
+  stone: { n: 'Камень', s: 'rock',  p: ['#8e8e9c', '#5a5a66', '#bcbcc9'] },
+  moss:  { n: 'Мох',    s: 'leaf',  p: ['#5c9440', '#33612a', '#8fd06a'] },
+  ash:   { n: 'Пепел',  s: 'clod',  p: ['#6e6a72', '#43404a', '#9d99a3'] },
+  grass: { n: 'Трава',  s: 'leaf',  p: ['#78c04a', '#417a2c', '#b6f07e'] },
+  mush:  { n: 'Гриб',   s: 'mush',  p: ['#c8514f', '#7d2a2c', '#f0dcc8'] },
+  brew:  { n: 'Отвар',  s: 'pot',   p: ['#6a8f3c', '#3f5a22', '#a8c96a'] },
+
+  // req — реплика заказа. Прототип показал, что её нельзя брать из набора персонажа:
+  // иначе стражник просит мазь, а говорит про бессонницу. Фраза идёт от зелья.
+  p_bod:   { n: 'Отвар бодрости', s: 'vial', p: ['#e8c33a', '#8a6c12', '#fff2a8'], kind: 'potion',
+             req: ['Мне бы не спать.', 'Дай бодрости.'] },
+  p_sleep: { n: 'Настой сна',     s: 'vial', p: ['#7a6ad8', '#42357f', '#c0b4ff'], kind: 'potion',
+             req: ['Не могу уснуть.', 'Мне бы уснуть.'] },
+  p_burn:  { n: 'Мазь от ожогов', s: 'vial', p: ['#5fc9a8', '#2f7a63', '#adf3dd'], kind: 'potion',
+             req: ['Мне от ожогов.', 'Обжёгся, помоги.'] },
+  p_power: { n: 'Зелье силы',     s: 'vial', p: ['#d8455f', '#8a1f33', '#ffa8b8'], kind: 'potion',
+             req: ['Нужна сила.', 'Что посильнее.'] },
+  p_sight: { n: 'Эликсир зрения', s: 'vial', p: ['#4ab6d8', '#22697f', '#a8e8ff'], kind: 'potion',
+             req: ['Глаза болят.', 'Плохо вижу.'] },
+};
+const RECIPES = [
+  ['water', 'fire', 'steam'], ['water', 'earth', 'clay'], ['water', 'air', 'dew'],
+  ['fire', 'earth', 'lava'], ['fire', 'air', 'smoke'], ['earth', 'air', 'dust'],
+  ['clay', 'fire', 'pot'], ['steam', 'air', 'fog'], ['dust', 'water', 'mud'],
+  ['lava', 'water', 'stone'], ['dew', 'earth', 'moss'], ['smoke', 'earth', 'ash'],
+  ['moss', 'dew', 'grass'], ['moss', 'mud', 'mush'], ['grass', 'water', 'brew'],
+  ['brew', 'fire', 'p_bod'], ['grass', 'steam', 'p_sleep'], ['moss', 'clay', 'p_burn'],
+  ['mush', 'brew', 'p_power'], ['dew', 'grass', 'p_sight'],
+];
+const BASE = ['water', 'fire', 'earth', 'air'];
+const RMAP = {};                                    // "a|b" → результат, пара без порядка
+const key2 = (a, b) => a < b ? a + '|' + b : b + '|' + a;
+RECIPES.forEach(([a, b, r]) => { RMAP[key2(a, b)] = r; });
+
+// глубина считается волной от базовых — она задаёт цену и времена
+const DEPTH = {};
+(function computeDepth() {
+  BASE.forEach(e => DEPTH[e] = 0);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const [a, b, r] of RECIPES) {
+      if (DEPTH[a] === undefined || DEPTH[b] === undefined) continue;
+      const d = Math.max(DEPTH[a], DEPTH[b]) + 1;
+      if (DEPTH[r] === undefined || d < DEPTH[r]) { DEPTH[r] = d; changed = true; }
+    }
+  }
+})();
+const priceOf  = id => Math.round(6 * Math.pow(1.55, DEPTH[id] || 1));
+const brewSec  = id => 2 + (DEPTH[id] || 1) * 3;          // ручная варка
+const shelfSec = id => 12 + (DEPTH[id] || 1) * 10;        // полка — медленнее, зато сама
+const POTIONS = Object.keys(EL).filter(k => EL[k].kind === 'potion');
+const isPotion = id => EL[id].kind === 'potion';
+
+/* ═══════════════ Покупатели ═══════════════ */
+/* Прототип показал: на 12 пикселях цвет мантии не читается — три типа слились
+   в одну бурую массу. Различаем силуэтом: шлем, шапочка, острая шляпа.        */
+const SIL = {
+  guard: [
+    '..dddddd..', '.dddddddd.', '.dd.cc.dd.', '..cccccc..', '..cccccc..',
+    '...cccc...', '.aaaaaaaa.', 'aaaaaaaaaa', 'aaaaaaaaaa', 'aaaaaaaaaa',
+    'aaaaaaaaaa', 'aaaaaaaaaa', '.aaaaaaaa.', '.aaa..aaa.', '.aaa..aaa.',
+    '.bbb..bbb.', '.bbb..bbb.', '.bbb..bbb.', 'bbbb.bbbb.', 'bbbb.bbbb.',
+  ],
+  scholar: [
+    '...cccc...', '..dddddd..', '..cccccc..', '..c.cc.c..', '..cccccc..',
+    '...cccc...', '...aaaa...', '..aaaaaa..', '..aaaaaa..', '..aaaaaa..',
+    '..aaaaaa..', '..aaaaaa..', '..aaaaaa..', '..aa..aa..', '..aa..aa..',
+    '..bb..bb..', '..bb..bb..', '..bb..bb..', '.bbb.bbb..', '.bbb.bbb..',
+  ],
+  witch: [
+    '....dd....', '...dddd...', '..dddddd..', '.dddddddd.', 'dddddddddd',
+    '..cccccc..', '..c.cc.c..', '..cccccc..', '.aaaaaaaa.', 'aaaaaaaaaa',
+    'aaaaaaaaaa', 'aaaaaaaaaa', 'aaaaaaaaaa', 'aaaaaaaaaa', '.aaaaaaaa.',
+    '.aaaaaaaa.', '.bbbbbbbb.', '..bbbbbb..', '..bbbbbb..', '.bbbbbbbb.',
+  ],
+};
+const CUSTOMERS = [
+  { id: 'guard',   n: 'Стражник', pref: ['p_bod', 'p_burn'],
+    come: ['Ночная смена.', 'Служба.'],
+    thanks: ['Служба зовёт.', 'Годно.'], leave: ['Так и не дождался.'],
+    pal: ['#5b6a8a', '#333c52', '#e8c9a0', '#8a97ab'] },
+  { id: 'scholar', n: 'Школяр', pref: ['p_sight', 'p_sleep'],
+    come: ['Экзамен утром.', 'Помоги, мастер.'],
+    thanks: ['Благодарю!', 'То, что нужно.'], leave: ['Опять не успел...'],
+    pal: ['#8a6a4a', '#54402c', '#f0d8b8', '#4a6a8a'] },
+  { id: 'witch',   n: 'Ведьма', pref: ['p_power', 'p_sight', 'p_sleep'],
+    come: ['Показывай товар.', 'И не разбавляй.'],
+    thanks: ['Сойдёт.', 'Ещё зайду.'], leave: ['Пустая лавка.'],
+    pal: ['#6a4a8a', '#3f2a54', '#d8c0e8', '#2a1f38'] },
+];
+const CMAP = {}; CUSTOMERS.forEach(c => CMAP[c.id] = c);
+
+/* ═══════════════ Спрайты ═══════════════ */
+function buildSprites() {
+  for (const id in EL) {
+    const e = EL[id];
+    SPRITES['el_' + id] = mk(SHAPES[e.s], { a: e.p[0], b: e.p[1], c: e.p[2] });
+  }
+  // склянка на полке — мелкая, 6×9
+  for (const id of POTIONS) {
+    const e = EL[id];
+    SPRITES['sm_' + id] = mk([
+      '.bb..', '.b.b.', 'baaab', 'bacab', 'bacab', 'baaab', 'baaab', '.bbb.',
+    ], { a: e.p[0], b: e.p[1], c: e.p[2] });
+  }
+  // масштаб согласован с остальным: котёл 34×23 с ногами, человек 12×22, иконка 12
+  const CP = { a: '#3d4a52', b: '#232c33', c: '#6b7c85', d: '#8fa2ac' };
+  SPRITES.cauldron = outline(mk([
+    '.....dddddddddddddddddddddd.....',
+    '....dccccccccccccccccccccccd....',
+    '....cbbbbbbbbbbbbbbbbbbbbbbc....',
+    '...ccbbbbbbbbbbbbbbbbbbbbbbcc...',
+    '..ccaaaaaaaaaaaaaaaaaaaaaaaabb..',
+    '.ccaaaaaaaaaaaaaaaaaaaaaaaaaabb.',
+    '.caaaaaaaaaaaaaaaaaaaaaaaaaaabb.',
+    'ccaaaaaaaaaaaaaaaaaaaaaaaaaaaabb',
+    'ccaaaaaaaaaaaaaaaaaaaaaaaaaaaabb',
+    'ccaaaaaaaaaaaaaaaaaaaaaaaaaaaabb',
+    'ccaaaaaaaaaaaaaaaaaaaaaaaaaaaabb',
+    '.caaaaaaaaaaaaaaaaaaaaaaaaaaabb.',
+    '.ccaaaaaaaaaaaaaaaaaaaaaaaaabbb.',
+    '..caaaaaaaaaaaaaaaaaaaaaaaabbb..',
+    '...cbaaaaaaaaaaaaaaaaaaaabbbb...',
+    '....bbaaaaaaaaaaaaaaaaaabbbb....',
+    '.....bbbbbbbbbbbbbbbbbbbbbb.....',
+    '......bbbbbbbbbbbbbbbbbbbb......',
+    '.......bb.....bbbb.....bb.......',
+    '.......bb.....bbbb.....bb.......',
+    '......bbb.....bbbb.....bbb......',
+  ], CP));
+  // огонь под котлом: два кадра, языки переставлены
+  const FP = { a: '#ff8c2a', b: '#b03a12', c: '#ffd96b' };
+  SPRITES.fire0 = mk([
+    '....c....c.....c....',
+    '...ca...cac...ca....',
+    '..caac..cac..caac...',
+    '..caaac.caac.caaac..',
+    '.caaaaacaaaacaaaaac.',
+    '.caaaaaaaaaaaaaaaac.',
+    '..baaaabbaabbaaaab..',
+  ], FP);
+  SPRITES.fire1 = mk([
+    '......c....c...c....',
+    '....ca...ca...cac...',
+    '...caac.caac..cac...',
+    '..caaac.caaac.caac..',
+    '.caaaaacaaaaacaaaac.',
+    '.caaaaaaaaaaaaaaaac.',
+    '..baaabbaaabbaaaab..',
+  ], FP);
+  // свеча и два кадра её пламени
+  SPRITES.candle = outline(mk([
+    '.ccc.', '.ccc.', '.ccc.', '.ccc.', 'bbbbb', '.bbb.',
+  ], { c: '#e8dcc0', b: '#8a6640' }));
+  SPRITES.cf0 = mk(['.a.', 'aca', 'aca', '.a.'], { a: '#ff9c3a', c: '#ffe27a' });
+  SPRITES.cf1 = mk(['a..', 'aca', '.ca', '.a.'], { a: '#ff9c3a', c: '#ffe27a' });
+  // пучок сушёных трав — висит под полками
+  SPRITES.herb = mk([
+    '...b...', '...b...', '..aaa..', '.aaaaa.', '.acaca.',
+    '.aaaaa.', '..aaa..', '..a.a..', '...a...',
+  ], { a: '#5c8440', b: '#a08a5a', c: '#8fc06a' });
+  SPRITES.book = outline(mk([
+    'bbbbbbbb', 'baaaaacb', 'bacccacb', 'baaaaacb', 'bacccacb', 'baaaaacb', 'bbbbbbbb',
+  ], { a: '#9a3f3f', b: '#4a1f1f', c: '#e8d8b8' }));
+  // окно — одно из пяти мест мебели по спеке; здесь стоит статично, чтобы
+  // комната читалась комнатой, а не задником
+  // дневное окно: небо и облако
+  SPRITES.windowDay = outline(mk([
+    'bbbbbbbbbbbbbbbbbbbbbbbbbb',
+    'bssssssssssbbssssssssssssb',
+    'bssssssssssbbsssscccsssssb',
+    'bsssscccsssbbssscccccccssb',
+    'bssscccccccbbscccccccccccb',
+    'bsscccccccsbbssscccccssssb',
+    'bssssssssssbbssssssssssssb',
+    'bssssssssssbbssssssssssssb',
+    'bssssssssssbbssssssssssssb',
+    'bbbbbbbbbbbbbbbbbbbbbbbbbb',
+    'bbbbbbbbbbbbbbbbbbbbbbbbbb',
+    'bttttttttttbbttttttttttttb',
+    'bttttttttttbbttttttttttttb',
+    'btttccttttcbbtttttttccttcb',
+    'bttcccccttcbbttttttcccccccb'.slice(0, 26),
+    'bttttttttttbbttttttttttttb',
+    'bttttttttttbbttttttttttttb',
+    'bttttttttttbbttttttttttttb',
+    'bbbbbbbbbbbbbbbbbbbbbbbbbb',
+    'bbbbbbbbbbbbbbbbbbbbbbbbbb',
+  ], { b: '#6b5038', s: '#5a8ac8', t: '#7aa8dc', c: '#e8f0f8' }));
+  // ночное окно: две тональности неба и месяц; звёзды мигают поверх в рантайме
+  SPRITES.window = outline(mk([
+    'bbbbbbbbbbbbbbbbbbbbbbbbbb',
+    'bssssssssssbbssssssssssssb',
+    'bssssssssssbbssssssmmssssb',
+    'bssssssssssbbsssssmmmssssb',
+    'bssssssssssbbssssssmmssssb',
+    'bssssssssssbbssssssssssssb',
+    'bssssssssssbbssssssssssssb',
+    'bssssssssssbbssssssssssssb',
+    'bssssssssssbbssssssssssssb',
+    'bbbbbbbbbbbbbbbbbbbbbbbbbb',
+    'bbbbbbbbbbbbbbbbbbbbbbbbbb',
+    'bttttttttttbbttttttttttttb',
+    'bttttttttttbbttttttttttttb',
+    'bttttttttttbbttttttttttttb',
+    'bttttttttttbbttttttttttttb',
+    'bttttttttttbbttttttttttttb',
+    'bttttttttttbbttttttttttttb',
+    'bttttttttttbbttttttttttttb',
+    'bbbbbbbbbbbbbbbbbbbbbbbbbb',
+    'bbbbbbbbbbbbbbbbbbbbbbbbbb',
+  ], { b: '#4a3624', s: '#18223f', t: '#233355', m: '#e8e0b0' }));
+  // мелочёвка на стену и пол — комната перестаёт быть пустым задником
+  SPRITES.skull = outline(mk([
+    '.aaaaa.', 'aaaaaaa', 'abbabba', 'abbabba', 'aaabaaa', '.aaaaa.', '.ababa.',
+  ], { a: '#c8c0ac', b: '#4a4438' }));
+  SPRITES.scroll = outline(mk([
+    'bbbbbbb', '.aaaaa.', '.aacaa.', '.aaaaa.', '.aaaaa.', '.aaaaa.', '.a.a.a.',
+  ], { a: '#d0bd93', b: '#8a6640', c: '#a03a2a' }));
+  SPRITES.books = outline(mk([
+    '.rrrrrrr.', '.rrrrrrr.', 'ggggggg..', 'ggggggg..', '..vvvvvvv', '..vvvvvvv',
+  ], { r: '#7a4444', g: '#4a6a54', v: '#6a5a8a' }));
+  SPRITES.coin = mk(['.aaa.', 'accca', 'acbca', 'accca', '.aaa.'], { a: '#c8951e', b: '#8a6412', c: '#f0d060' });
+  SPRITES.spkOn = mk([
+    '...a.', '..aa.', 'aaaa.', 'aaaa.', 'aaaa.', '..aa.', '...a.',
+  ], { a: '#f0e6d2' });
+  SPRITES.spkOff = mk([
+    '...a.', '..aa.', 'aaaa.', 'aaaab', 'aaaa.', '..aa.', '...a.',
+  ], { a: '#8a8290', b: '#c04040' });
+  // покупатели: одна болванка, палитра по типу; три тональных варианта на тип,
+  // иначе двое одинаковых в очереди читаются клонами
+  const shade = (hex, k) => {
+    const n = parseInt(hex.slice(1), 16);
+    const ch = i => Math.max(0, Math.min(255, Math.round(((n >> i) & 255) * k)));
+    return '#' + ((1 << 24) | (ch(16) << 16) | (ch(8) << 8) | ch(0)).toString(16).slice(1);
+  };
+  CUSTOMERS.forEach(c => {
+    [1, .8, 1.22].forEach((k, v) => {              // шляпа темнеет, когда мантия светлеет
+      SPRITES['cus_' + c.id + v] = outline(mk(SIL[c.id],
+        { a: shade(c.pal[0], k), b: shade(c.pal[1], k), c: c.pal[2], d: shade(c.pal[3], 2 - k) }));
+    });
+  });
+}
+
+/* ═══════════════ Звук: shared/sfx.js ═══════════════
+   Точечные эффекты вызываются по месту событий; здесь — музыка и эмбиент.
+   Ночь — лидийский mood «alchemy», день — «dawn», под всем тлеет очаг.
+   Разблокировку AudioContext по первому жесту библиотека делает сама.       */
+function applyAudioPhase() {
+  if (state.muted) return;
+  SFX.music.start(state.phase === 'day' ? 'dawn' : 'alchemy', state.phase === 'day' ? .6 : .45);
+  if (!SFX.amb.playing()) SFX.amb.start('hearth');
+}
+
+/* ═══════════════ Состояние ═══════════════ */
+const now = () => Date.now();
+const state = {
+  coins: 0,
+  known: BASE.slice(),                 // порядок открытия; базовые всегда первыми
+  slots: [null, null],
+  brew: null,                          // {id, t0, sec}
+  shelves: [                           // прототип: две полки
+    { potion: null, n: 0, t0: 0 },
+    { potion: null, n: 0, t0: 0 },
+  ],
+  hand: [],                            // готовые склянки у прилавка, максимум 4
+  phase: 'night',                      // ночью варим, днём продаём
+  shift: false,                        // = (phase === 'day')
+  shiftT0: 0,
+  day: 1,
+  plan: [],                            // план завтрашнего дня: кто придёт и за чем
+  planIdx: 0,
+  queue: [],                           // {cid, want:[{id,n}], phrase, t0}
+  nextCome: 0,
+  report: null,                        // отчёт смены
+  stat: null,                          // накопление за смену
+  muted: false,
+  tried: new Set(),                    // испробованные пары «a|b» — гасим их в палитре
+  lastMix: null,                       // {a, b, r} для строки состава
+  palScroll: 0,
+  toast: null,
+  lastSeen: 0,                         // для попапа «пока тебя не было»
+};
+const SHELF_CAP = 5, HAND_CAP = 4, QUEUE_MAX = 5;
+// цены полок подобраны симулятором (docs/superpowers/sim/alchemy-economy.js)
+const SHELF_PRICES = [1000, 5000, 11000, 22000];
+
+/* ═══════════════ Сейв и оффлайн ═══════════════
+   Вся логика на Date.now(), поэтому оффлайн бесплатен: полки досчитывают
+   склянки по таймстампам сами, как только состояние загружено. Сейв —
+   раз в пять секунд из кадра и при уходе со вкладки. ?reset=1 стирает. */
+const SAVE_KEY = 'alchemy_proto_v3';
+let lastSave = 0;
+function saveGame() {
+  try {
+    const s = { ...state, tried: [...state.tried], toast: null, lastSeen: now() };
+    localStorage.setItem(SAVE_KEY, JSON.stringify(s));
+  } catch (e) {}
+}
+function loadGame() {
+  try {
+    if (/[?&]reset=1/.test(location.search)) { localStorage.removeItem(SAVE_KEY); return false; }
+    const raw = localStorage.getItem(SAVE_KEY);
+    if (!raw) return false;
+    const s = JSON.parse(raw);
+    Object.assign(state, s, { tried: new Set(s.tried || []), toast: null });
+    const before = state.shelves.reduce((a, sh) => a + sh.n, 0);
+    tickShelves();                                // полки наварили пока нас не было
+    const made = state.shelves.reduce((a, sh) => a + sh.n, 0) - before;
+    const away = now() - (s.lastSeen || now());
+    if (away > 60000 && made > 0) say('Полки наварили ' + made + ' склянок.', 3500);
+    else if (away > 60000) say('С возвращением. Ночь ' + state.day + '.', 2500);
+    // день, истёкший без игрока, закрывается сам — отчёт увидим сразу
+    if (state.phase === 'day' && now() - state.shiftT0 >= DAY_SEC * 1000) {
+      state.stat = state.stat || { sold: 0, coins: 0, found: 0, left: 0, missed: 0 };
+      closeDay();
+    }
+    return true;
+  } catch (e) { return false; }
+}
+addEventListener('visibilitychange', () => { if (document.hidden) saveGame(); });
+addEventListener('pagehide', saveGame);
+
+function say(s, ms = 1600) { state.toast = { s, until: now() + ms }; }
+function stockOf(id) {
+  let n = state.hand.filter(x => x === id).length;
+  state.shelves.forEach(s => { if (s.potion === id) n += s.n; });
+  return n;
+}
+function takeStock(id, count) {
+  for (const s of state.shelves) {
+    while (count > 0 && s.potion === id && s.n > 0) { s.n--; count--; }
+  }
+  for (let i = state.hand.length - 1; i >= 0 && count > 0; i--)
+    if (state.hand[i] === id) { state.hand.splice(i, 1); count--; }
+  return count === 0;
+}
+function addVial(id) {
+  const sh = state.shelves.find(s => s.potion === id && s.n < SHELF_CAP);
+  if (sh) { sh.n++; return 'полка'; }
+  if (state.hand.length < HAND_CAP) { state.hand.push(id); return 'прилавок'; }
+  return null;
+}
+
+/* ═══════════════ Смешивание: бросок в котёл ═══════════════
+   Тап по палитре — элемент летит дугой в котёл. Первый остаётся плавать
+   («основа»), второй запускает реакцию: котёл бурлит ~0.6 с и выдаёт
+   результат — вспышку с искрами или серый пшик. Тап по котлу выплёскивает
+   основу. Никаких слотов-ячеек: котёл и есть интерфейс.                  */
+let flash = null;
+let flyers = [], sparks = [], puffs = [], wisps = [], blips = [], coinsFly = [];
+let reacting = null;                              // {a, b, t0}
+const GOLD = ['#fff6dd', '#ffd54a', '#e08a1c'];
+const SPLASH = ['#a9dcf5', '#6fc9dc', '#3f8ecc'];
+const potMouth = () => ({ x: L.cau.x + (L.cau.w >> 1), y: L.cau.y + 3 });
+function addFlyer(id, x0, y0, cb) {
+  const m = potMouth();
+  flyers.push({ id, x0, y0, x1: m.x, y1: m.y, t: 0, dur: .32, cb });
+}
+function addSparks(x, y, cols) {
+  for (let i = 0; i < 10; i++) {
+    const a = Math.random() * Math.PI * 2, sp = 16 + Math.random() * 30;
+    sparks.push({ x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp - 22, t: 0, life: .35 + Math.random() * .3, cols });
+  }
+}
+function addPuff(x, y) {
+  for (let i = 0; i < 7; i++)
+    puffs.push({ x: x + ((Math.random() * 14) | 0) - 7, y: y - ((Math.random() * 4) | 0), t: 0, life: .5 + Math.random() * .3 });
+}
+function addBlips(n) {
+  for (let i = 0; i < n; i++)
+    blips.push({ dx: ((Math.random() * (L.cau.w - 16)) | 0) + 8 - (L.cau.w >> 1), age: -((Math.random() * 5) | 0) });
+}
+function addCoinFly(x0, y0, n) {                  // дуга монет от покупателя к кошельку
+  for (let i = 0; i < n; i++) coinsFly.push({ x0, y0, t: -i * .07, dur: .45 });
+}
+function pullBase() {                             // выплеснуть основу из котла
+  if (!state.slots[0] || reacting || flyers.length) return;
+  const m = potMouth();
+  addSparks(m.x, m.y, SPLASH);
+  SFX.water({ v: .6, d: .35 });
+  state.slots[0] = null;
+}
+function throwElement(id, x0, y0) {
+  if (ui || state.report || reacting || flyers.length) return;
+  SFX.tap({ v: .7 });
+  if (!state.slots[0]) addFlyer(id, x0, y0, () => { state.slots[0] = id; state.lastMix = null; addBlips(3); SFX.water({ v: .45, d: .3 }); });
+  // повторный тап по той же ячейке снимает основу — это основной способ передумать
+  else if (state.slots[0] === id) pullBase();
+  else addFlyer(id, x0, y0, () => { addBlips(10); SFX.spell({ v: .5 }); reacting = { a: state.slots[0], b: id, t0: now() }; });
+}
+function resolveMix(a, b) {
+  const k = key2(a, b), r = RMAP[k];
+  state.tried.add(k);
+  state.lastMix = { a, b, r: r || null };
+  const m = potMouth();
+  if (!r) { addPuff(m.x, m.y - 4); SFX.drop({ v: .8 }); return; }
+  const isNew = !state.known.includes(r);
+  if (isNew) {
+    state.known.push(r);
+    flash = { id: r, t: 0 };
+    addSparks(m.x, m.y - 2, GOLD);
+    SFX.reveal();
+    if (state.stat) state.stat.found++;
+  }
+  // таймер варки только у зелий: ингредиент — знание, оно появляется мгновенно
+  if (!isPotion(r)) return;
+  /* Днём склянки не варятся — открывать можно, производить нельзя. Симулятор
+     показал: пока днём можно сварить заказ при клиенте, весь идл-контур (полки,
+     вместимость, подмастерья) экономически мёртв. День живёт ночным запасом. */
+  if (state.phase === 'day') { say('Днём торгуем. Склянки ждут ночи.', 2000); return; }
+  if (state.brew) { say('Котёл занят — ' + EL[r].n + ' в другой раз.'); return; }
+  const room = state.shelves.some(s => s.potion === r && s.n < SHELF_CAP) || state.hand.length < HAND_CAP;
+  if (!room) { say('Некуда ставить: полки и прилавок полны.'); return; }
+  state.brew = { id: r, t0: now(), sec: brewSec(r) };
+}
+// обёртка для скриптовых проверок: кладёт пару и разрешает её мгновенно
+function tryMix() {
+  const [a, b] = state.slots;
+  if (!a || !b) return;
+  state.slots = [a, null];
+  resolveMix(a, b);
+}
+function tickBrew() {
+  if (!state.brew) return;
+  if (now() - state.brew.t0 < state.brew.sec * 1000) return;
+  const id = state.brew.id;
+  state.brew = null;
+  if (!isPotion(id)) { say(EL[id].n + ' — не товар, но рецепт записан.'); return; }
+  const where = addVial(id);
+  if (where) SFX.bell({ v: .3 }); else SFX.error({ v: .5 });
+  say(where ? EL[id].n + ' → ' + where : 'Некуда ставить: всё занято.');
+}
+function tickShelves() {
+  const t = now();
+  for (const s of state.shelves) {
+    if (!s.potion || s.n >= SHELF_CAP) { if (s.potion) s.t0 = t; continue; }
+    const per = shelfSec(s.potion) * 1000;
+    while (s.n < SHELF_CAP && t - s.t0 >= per) { s.n++; s.t0 += per; }
+  }
+}
+
+/* ═══════════════ День и ночь ═══════════════
+   Ночь без таймера: варим и исследуем. День ровно DAY_SEC секунд, на закате
+   закрывается сам. План следующего дня составляется на закате и виден всю
+   ночь — кто в прогнозе, тот и придёт, ничего сверх плана.                 */
+const DAY_SEC = 180, PLAN_MIN = 4, PLAN_MAX = 6;
+const pick = arr => arr[Math.floor(Math.random() * arr.length)];
+function makePlan() {
+  const openPot = POTIONS.filter(p => state.known.includes(p));
+  state.plan = []; state.planIdx = 0;
+  if (!openPot.length) return;
+  // спрос растёт с ассортиментом — лавка становится известнее (вывод симулятора:
+  // при постоянных 4–6 покупателях апгрейды перестают окупаться на второй ступени)
+  const n = PLAN_MIN + Math.floor(openPot.length / 3) + Math.floor(Math.random() * (PLAN_MAX - PLAN_MIN + 1));
+  let prev = null;                       // два одинаковых подряд читаются клонами
+  for (let i = 0; i < n; i++) {
+    let cands = CUSTOMERS.filter(c => c.pref.some(p => openPot.includes(p)));
+    if (!cands.length) cands = CUSTOMERS;
+    const fresh = cands.filter(c => c.id !== prev);
+    const c = pick(fresh.length ? fresh : cands);
+    prev = c.id;
+    const pool = c.pref.filter(p => openPot.includes(p));
+    const id = pool.length ? pick(pool) : pick(openPot);
+    state.plan.push({ cid: c.id, id, n: 1 + (Math.random() < .3 ? 1 : 0) });
+  }
+}
+// прогноз для прилавка: сколько каких зелий понадобится завтра
+function planNeeds() {
+  const m = {};
+  state.plan.forEach(p => { m[p.id] = (m[p.id] || 0) + p.n; });
+  return Object.entries(m);
+}
+function openDay() {
+  if (!POTIONS.some(p => state.known.includes(p))) { say('Нечего продавать — открой зелье.', 2200); return; }
+  if (!state.plan.length) makePlan();
+  state.phase = 'day'; state.shift = true; state.shiftT0 = now();
+  state.queue = []; state.planIdx = 0; state.nextCome = now() + 1500;
+  state.stat = { sold: 0, coins: 0, found: 0, left: 0, missed: 0 };
+  fade = { from: 'night', t0: now() };
+  SFX.open(); applyAudioPhase(); saveGame();
+  say('Рассвет. Лавка открыта.');
+}
+function closeDay() {
+  // упущенная выгода: и те, кто стоял в очереди, и те, кто не успел прийти
+  let missed = 0, left = state.queue.length;
+  state.queue.forEach(q => q.want.forEach(w => { missed += priceOf(w.id) * w.n; }));
+  for (let i = state.planIdx; i < state.plan.length; i++) {
+    left++; missed += priceOf(state.plan[i].id) * state.plan[i].n;
+  }
+  state.stat.left = left; state.stat.missed = missed;
+  state.stat.day = state.day;
+  // необслуженные уходят — видимо, а не исчезают
+  if (L) state.queue.forEach((q, i) => leavers.push({ cid: q.cid, v: q.v, x: L.cnt.x + 3 + i * 13, t0: now() }));
+  state.phase = 'night'; state.shift = false; state.queue = [];
+  state.day++;
+  makePlan();                                   // прогноз на завтра — сразу
+  state.stat.next = planNeeds();
+  state.report = state.stat; state.stat = null;
+  fade = { from: 'day', t0: now() };
+  SFX.close(); applyAudioPhase(); saveGame();
+}
+function spawnFromPlan() {
+  if (state.queue.length >= QUEUE_MAX || state.planIdx >= state.plan.length) return;
+  const p = state.plan[state.planIdx++];
+  const line = pick(EL[p.id].req || CMAP[p.cid].come) + (p.n > 1 ? ' ' + p.n + ' ШТ.' : '');
+  state.queue.push({ cid: p.cid, v: (Math.random() * 3) | 0, want: [{ id: p.id, n: p.n }], phrase: line, t0: now() });
+}
+const spawnCustomer = spawnFromPlan;            // имя для скриптовых проверок
+function tickQueue() {
+  if (state.phase !== 'day') return;
+  if (now() - state.shiftT0 >= DAY_SEC * 1000) { closeDay(); return; }
+  if (now() >= state.nextCome) {
+    spawnFromPlan();
+    state.nextCome = now() + (8000 + Math.random() * 7000);
+  }
+}
+const openShift = openDay, closeShift = closeDay;
+function serve(i) {
+  const c = state.queue[i];
+  if (!c) return;
+  const ok = c.want.every(w => stockOf(w.id) >= w.n);
+  if (!ok) { say('Этого нет в наличии.'); SFX.error({ v: .6 }); return; }
+  let sum = 0;
+  c.want.forEach(w => { takeStock(w.id, w.n); sum += priceOf(w.id) * w.n; });
+  if (c.cid === 'witch') sum = Math.round(sum * 1.5);       // ведьма платит больше
+  state.coins += sum;
+  state.stat.sold += c.want.reduce((a, w) => a + w.n, 0);
+  state.stat.coins += sum;
+  const nCoins = Math.min(6, 2 + ((sum / 25) | 0));
+  addCoinFly(L.cnt.x + 3 + i * 13 + 6, L.cnt.y - 6, nCoins);
+  SFX.coins({ n: nCoins });
+  leavers.push({ cid: c.cid, v: c.v, x: L.cnt.x + 3 + i * 13, t0: now() });   // уходит вправо
+  state.queue.splice(i, 1);
+  // надбавку ведьмы показываем словами, иначе ×1.5 остаётся невидимым правилом
+  say(c.cid === 'witch' ? 'Ведьма платит щедро: +' + sum : pick(CMAP[c.cid].thanks) + ' +' + sum);
+}
+
+/* ═══════════════ Компоновка ═══════════════ */
+let L = null;
+function resize() {
+  const dpr = Math.min(window.devicePixelRatio || 1, 3);
+  const devW = Math.round(window.innerWidth * dpr), devH = Math.round(window.innerHeight * dpr);
+  const land = window.innerWidth > window.innerHeight * 1.15;
+  const wantW = land ? 320 : 118, wantH = land ? 180 : 256;
+  S = Math.max(1, Math.min(Math.floor(devW / wantW), Math.floor(devH / wantH)));
+  LW = Math.floor(devW / S); LH = Math.floor(devH / S);
+  buf.width = LW; buf.height = LH;
+  screenCv.width = LW * S; screenCv.height = LH * S;
+  screenCv.style.width = (LW * S / dpr) + 'px';
+  screenCv.style.height = (LH * S / dpr) + 'px';
+  sctx.imageSmoothingEnabled = false; ctx.imageSmoothingEnabled = false;
+
+  const HUD_H = 12;
+  const PAL_H = land ? 28 : Math.min(76, Math.floor(LH * 0.32));
+  const y0 = HUD_H, y1 = LH - PAL_H;
+  const CELL = 16, PITCH = 18;
+
+  /* Позиции выводятся друг из друга снизу вверх — так наложения невозможны
+     ни на одном размере экрана. Над горловиной котла — воздух под бросок. */
+  const cauW = SW('cauldron'), cauH = SH('cauldron'), cusH = SH('cus_guard0');
+  const CNT_H = 15;
+
+  if (land) {
+    const shelfW = Math.min(118, Math.floor(LW * 0.37));
+    const cau = { x: shelfW + 22, y: y1 - cauH - 1, w: cauW, h: cauH };
+    const cntX = cau.x + cauW + 14;
+    const cnt = { x: cntX, y: y1 - CNT_H - 3, w: LW - cntX - 4, h: CNT_H };
+    const potTop = cau.y - 22;
+    const shelf = { x: 3, y: y0 + 3, w: shelfW, h: Math.max(28, Math.min(86, potTop - 6 - (y0 + 3))) };
+    const book = { x: Math.max(3, cau.x - 44), y: y1 - 14 };
+    L = { land, HUD_H, PAL_H, y0, y1, shelf, cau, cnt, CELL, PITCH, cusH, book,
+          sign: { y: y0 + 8 }, signRow: false,
+          win: { x: Math.min(cau.x + 56, LW - SW('window') - 66), y: y0 + 20 },
+          winStars: [{ x: 3, y: 3 }, { x: 7, y: 6 }, { x: 15, y: 4 }, { x: 22, y: 7 }],
+          candles: [{ x: book.x + SW('book') + 8, y: y1 - 17 }],
+          palCols: Math.max(1, Math.floor((LW - 4) / PITCH)), palRows: 1 };
+    L.clutter = [
+      { s: 'scroll', x: L.win.x - 16, y: L.win.y + 4 },
+      { s: 'skull',  x: L.win.x + SW('window') + 10, y: L.win.y + 8, bracket: true },
+      { s: 'books',  x: cnt.x - 12, y: y1 - 9 },
+    ];
+  } else {
+    const cau = { x: Math.floor((LW - cauW) / 2), y: y1 - cauH - 1, w: cauW, h: cauH };
+    const cnt = { x: 4, y: cau.y - 22 - 6 - CNT_H, w: LW - 8, h: CNT_H };
+    const bubbleTop = cnt.y - cusH - 17;
+    // в портрете вывеске нужна своя полоса: над прилавком, под полками
+    const shelf = { x: 4, y: y0 + 2, w: LW - 8, h: Math.max(26, bubbleTop - 21 - (y0 + 2)) };
+    const book = { x: Math.max(3, cau.x - 44), y: cau.y + cauH - 11 };
+    // окно и свеча нужны и в портрете: без них тезис «всё светится изнутри»
+    // и смена дня и ночи существовали только в альбоме
+    L = { land, HUD_H, PAL_H, y0, y1, shelf, cau, cnt, CELL, PITCH, cusH, book,
+          sign: { y: shelf.y + shelf.h + 4 }, signRow: true,
+          win: { x: LW - SW('window') - 4, y: Math.max(y0 + 14, cnt.y - SH('window') - 10) },
+          winStars: [{ x: 3, y: 3 }, { x: 7, y: 6 }, { x: 15, y: 4 }, { x: 22, y: 7 }],
+          // свеча на полочке у черепа: у журнала её пламя лезло на подпись
+          candles: [{ x: LW - 28, y: cnt.y + CNT_H + 8 }],
+          palCols: Math.max(1, Math.floor((LW - 6) / PITCH)),
+          palRows: Math.max(1, Math.floor((PAL_H - 8) / PITCH)) };
+    L.clutter = [
+      { s: 'scroll', x: 8, y: cnt.y + CNT_H + 6 },
+      { s: 'skull',  x: LW - 18, y: cnt.y + CNT_H + 8, bracket: true, bx: -11 },
+      { s: 'books',  x: LW - 30, y: y1 - 8 },
+    ];
+  }
+
+  // палитра: базовые четыре отделены корешком и не уезжают при прокрутке
+  const palTop = y1 + 9;
+  if (land) {
+    L.palBase = { x: 2, y: palTop };
+    const gx = 2 + 4 * PITCH + 4;
+    L.palGrid = { x: gx, y: palTop, cols: Math.max(1, Math.floor((LW - gx - 2) / PITCH)), rows: 1 };
+    L.spine = { x: 2 + 4 * PITCH + 1, y: palTop, w: 2, h: CELL };
+  } else {
+    L.palBase = { x: 3, y: palTop };
+    const gy = palTop + PITCH + 4;
+    L.palGrid = { x: 3, y: gy, cols: Math.max(1, Math.floor((LW - 6) / PITCH)),
+                  rows: Math.max(1, Math.floor((LH - gy - 2) / PITCH)) };
+    L.spine = { x: 3, y: palTop + PITCH + 1, w: LW - 6, h: 2 };
+  }
+  buildRoom();                                   // комната запекается один раз на размер
+}
+window.addEventListener('resize', resize);
+
+/* ═══════════════ Рисование ═══════════════ */
+let hits = [], animT = 0, F4 = 0, F8 = 0, prevF8 = -1;
+const pushHit = (x, y, w, h, fn) => hits.push({ x, y, w, h, fn });
+let ditherPat = null;
+function buildDither() {
+  const dc = document.createElement('canvas'); dc.width = dc.height = 2;
+  const dx = dc.getContext('2d');
+  dx.fillStyle = '#120d1a'; dx.fillRect(0, 0, 1, 1); dx.fillRect(1, 1, 1, 1);
+  ditherPat = ctx.createPattern(dc, 'repeat');
+}
+function slab(x, y, w, h, col, lo, hi) {
+  ctx.fillStyle = '#160f1f'; ctx.fillRect(x, y, w, h);
+  ctx.fillStyle = col; ctx.fillRect(x + 1, y + 1, w - 2, h - 2);
+  ctx.fillStyle = hi; ctx.fillRect(x + 1, y + 1, w - 2, 1);
+  ctx.fillStyle = lo; ctx.fillRect(x + 1, y + h - 2, w - 2, 1);
+}
+function panel(x, y, w, h) {
+  slab(x, y, w, h, '#2a1d3d', '#1d1430', '#43305c');
+  ctx.fillStyle = '#e8b04b';                       // латунные гвоздики по углам
+  ctx.fillRect(x + 1, y + 1, 1, 1); ctx.fillRect(x + w - 2, y + 1, 1, 1);
+  ctx.fillRect(x + 1, y + h - 2, 1, 1); ctx.fillRect(x + w - 2, y + h - 2, 1, 1);
+}
+const BTN = {
+  green: ['#3fae52', '#237a32', '#6ed67f'], gold: ['#c8951e', '#8a6412', '#f0d060'],
+  grey: ['#5b5566', '#3d3947', '#807a8c'], purple: ['#7a4ab0', '#4e2b73', '#a273d8'],
+};
+function button(x, y, w, h, label, kind, fn) {
+  const c = BTN[kind] || BTN.grey;
+  slab(x, y, w, h, c[0], c[1], c[2]);
+  const lb = fitText(label, w - 6);
+  text(lb, x + Math.floor((w - textW(lb)) / 2), y + Math.floor((h - FONT_H) / 2), fn ? '#ffffff' : '#b8b2c4');
+  if (fn) pushHit(x, y, w, h, fn);
+}
+function meter(x, y, w, p, col) {
+  p = Math.max(0, Math.min(1, p));
+  ctx.fillStyle = '#160f1f'; ctx.fillRect(x, y, w, 3);
+  const f = Math.round((w - 2) * p);
+  if (f > 0) { ctx.fillStyle = col; ctx.fillRect(x + 1, y + 1, f, 1); }
+}
+
+/* Комната запекается в оффскрин один раз на размер: кирпич с вариацией,
+   виньетка и свет — дизерингом (альфы по канону нет), пол с волокнами,
+   очаг под котлом. В кадре остаётся один drawImage, анимация — поверх. */
+let roomBufs = {};
+// две палитры комнаты: фаза меняет материалы, а не накладывает фильтр
+const PH = {
+  night: { wall: '#241a35', br: ['#3d2d52', '#342647', '#2e2244'], top: '#3f3057',
+           floor: '#55402c', ftop: '#6b5038', seam: '#463421', plank: '#42311f',
+           fib: ['#5e4830', '#4a3725'], vig: '#1a1226', vigA: 5, vigB: 11,
+           wl: ['#43305c', '#3b2a50'], fl: ['#6b4d33', '#5e4530'], win: 'window' },
+  day:   { wall: '#4a3a66', br: ['#69538c', '#5d4880', '#564178'], top: '#7460a0',
+           floor: '#7a5c3c', ftop: '#96714c', seam: '#68503a', plank: '#634b33',
+           fib: ['#8f6d46', '#6e5438'], vig: '#2e2244', vigA: 3, vigB: 7,
+           wl: ['#7d68a8', '#7460a0'], fl: ['#a37f56', '#8f6d46'], win: 'windowDay' },
+};
+function buildRoom() { roomBufs = { night: bakeRoom('night'), day: bakeRoom('day') }; }
+function bakeRoom(phase) {
+  const P = PH[phase];
+  const cv = document.createElement('canvas'); cv.width = LW; cv.height = LH;
+  const rc = cv.getContext('2d');
+  let seed = 0x5eed;
+  const rr = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+  const floorY = L.land ? L.y1 - 22 : L.y1 - 16;
+
+  // стена: кладка со случайной тональностью, редкие сколы, светлая грань сверху
+  rc.fillStyle = P.wall; rc.fillRect(0, 0, LW, floorY);
+  for (let y = L.y0 - 6; y < floorY; y += 6) {
+    const off = ((y / 6) | 0) % 2 * 8;
+    for (let x = off - 16; x < LW; x += 16) {
+      const v = rr();
+      rc.fillStyle = v < .12 ? P.br[0] : v < .82 ? P.br[1] : P.br[2];
+      rc.fillRect(x, y, 15, 5);
+      rc.fillStyle = P.top; rc.fillRect(x, y, 15, 1);
+      if (v > .93) { rc.fillStyle = P.wall; rc.fillRect(x + 3 + ((rr() * 8) | 0), y + 2, 2, 1); }
+    }
+  }
+  // пол: доски, стыки, волокна, плинтусная тень
+  rc.fillStyle = P.floor; rc.fillRect(0, floorY, LW, L.y1 - floorY);
+  rc.fillStyle = P.ftop; rc.fillRect(0, floorY, LW, 1);
+  rc.fillStyle = P.vig; rc.fillRect(0, floorY - 1, LW, 1);
+  const seamY = floorY + ((L.y1 - floorY) >> 1);
+  rc.fillStyle = P.seam; rc.fillRect(0, seamY, LW, 1);
+  for (let x = 0; x < LW; x += 11) {
+    rc.fillStyle = P.plank;
+    rc.fillRect(x, floorY + 1, 1, seamY - floorY - 1);
+    rc.fillRect(x + 5, seamY + 1, 1, L.y1 - seamY - 1);
+  }
+  for (let i = 0; i < LW / 3; i++) {
+    rc.fillStyle = rr() < .5 ? P.fib[0] : P.fib[1];
+    rc.fillRect((rr() * LW) | 0, floorY + 2 + ((rr() * (L.y1 - floorY - 3)) | 0), 1 + ((rr() * 3) | 0), 1);
+  }
+  // виньетка: углы и кромки темнее, две плотности дизеринга
+  for (let y = L.y0; y < L.y1; y++) for (let x = 0; x < LW; x++) {
+    const e = Math.min(x, LW - 1 - x, (y - L.y0) * 2, (L.y1 - y) * 3);
+    if ((e < P.vigA && (x + y) % 2 === 0) || (e < P.vigB && (x + y) % 4 === 0)) {
+      rc.fillStyle = P.vig; rc.fillRect(x, y, 1, 1);
+    }
+  }
+  if (L.win) rc.drawImage(SPRITES[P.win], L.win.x, L.win.y);
+  /* Дневной свет — вертикальный шафт из окна, а не радиальное пятно: радиальное
+     на манхэттенской метрике давало ромб из диагоналей и читалось глитчем. */
+  if (phase === 'day' && L.win) {
+    const wx = L.win.x + 1, ww = SW(P.win) - 2;
+    const top = L.win.y + SH(P.win) - 1;
+    for (let y = top; y < L.y1; y++) {
+      const k = (y - top) / (L.y1 - top);            // чем ниже, тем реже точки
+      const drift = Math.round(k * 6);               // луч уходит вправо
+      const wall = y < floorY;
+      for (let x = wx + drift; x < wx + ww + drift; x++) {
+        if (x < 0 || x >= LW) continue;
+        const edge = Math.min(x - (wx + drift), wx + ww + drift - 1 - x);
+        const dense = k < .35 && edge > 1 ? 2 : k < .7 ? 4 : 8;
+        if ((x + y) % dense) continue;
+        rc.fillStyle = wall ? (k < .35 ? '#8a76b4' : '#7d68a8') : (k < .7 ? '#b08c60' : '#a37f56');
+        rc.fillRect(x, y, 1, 1);
+      }
+    }
+  }
+  // очаг: камни под котлом
+  const hx = L.cau.x + (L.cau.w >> 1), hy = L.y1 - 2;
+  rc.fillStyle = '#2e2a38';
+  for (let i = -3; i <= 3; i++) rc.fillRect(hx + i * 5 - 2, hy - 2 + (Math.abs(i) > 1 ? 0 : 1), 4, 2);
+  rc.fillStyle = '#3a3542';
+  for (let i = -2; i <= 2; i++) rc.fillRect(hx + i * 5, hy - 3, 3, 2);
+  // свет: плотность дизеринга падает с расстоянием. Ночью — очаг и свечи,
+  // днём — очаг и прохладный поток из окна.
+  const lights = [{ x: hx, y: L.y1 - 8, r: 30, w: P.wl, f: P.fl }];
+  if (phase === 'night') (L.candles || []).forEach(c => lights.push({ x: c.x + 2, y: c.y, r: 16, w: P.wl, f: P.fl }));
+  for (const li of lights) {
+    for (let y = Math.max(L.y0, li.y - li.r); y < Math.min(L.y1, li.y + li.r); y++)
+      for (let x = Math.max(0, li.x - li.r); x < Math.min(LW, li.x + li.r); x++) {
+        const d = Math.abs(x - li.x) + Math.abs(y - li.y) * 1.5;
+        const wall = y < floorY;
+        if (d < li.r * .45 && (x + y) % 2 === 0) rc.fillStyle = wall ? li.w[0] : li.f[0];
+        else if (d < li.r && (x + y) % 4 === 0) rc.fillStyle = wall ? li.w[1] : li.f[1];
+        else continue;
+        rc.fillRect(x, y, 1, 1);
+      }
+  }
+  // мелочёвка после света: дизеринг пятен не должен крапать по спрайтам
+  (L.clutter || []).forEach(cl => {
+    if (cl.bracket) {                             // bx растягивает полочку влево — под свечу
+      rc.fillStyle = '#4a3624';
+      rc.fillRect(cl.x - 1 + (cl.bx || 0), cl.y + SH(cl.s) - 1, SW(cl.s) + 2 - (cl.bx || 0), 2);
+    }
+    rc.drawImage(SPRITES[cl.s], cl.x, cl.y);
+  });
+  return cv;
+}
+/* Смена фазы — дизер-переход, а не мгновенная подмена и не альфа (канон):
+   новая комната рисуется целиком, в ней пробиваются «дырки» по шахматному
+   паттерну (3/4 → 1/2 → 1/4), и в дырки подкладывается старая. */
+let fade = null, holePats = {}, meteor = null, leavers = [];
+function buildHolePats() {
+  const mk2 = cells => {
+    const c = document.createElement('canvas'); c.width = c.height = 2;
+    const x = c.getContext('2d'); x.fillStyle = '#000';
+    cells.forEach(([i, j]) => x.fillRect(i, j, 1, 1));
+    return ctx.createPattern(c, 'repeat');
+  };
+  holePats[75] = mk2([[0, 0], [1, 0], [0, 1]]);
+  holePats[50] = mk2([[0, 0], [1, 1]]);
+  holePats[25] = mk2([[0, 0]]);
+}
+function drawRoom() {
+  ctx.drawImage(roomBufs[state.phase] || roomBufs.night, 0, 0);
+  if (fade) {
+    const k = (now() - fade.t0) / 700;
+    if (k >= 1) fade = null;
+    else {
+      ctx.globalCompositeOperation = 'destination-out';
+      ctx.fillStyle = holePats[k < .33 ? 75 : k < .66 ? 50 : 25]; ctx.fillRect(0, 0, LW, LH);
+      ctx.globalCompositeOperation = 'destination-over';
+      ctx.drawImage(roomBufs[fade.from], 0, 0);
+      ctx.globalCompositeOperation = 'source-over';
+    }
+  }
+  if (!L.win || state.phase !== 'night') return;
+  // звёзды мигают по кадровому счётчику — только ночью
+  L.winStars.forEach((st, i) => {
+    if ((F4 + i * 2) % 9 < 7) {
+      ctx.fillStyle = (F4 + i * 3) % 9 < 1 ? '#ffffff' : '#8fa2c8';
+      ctx.fillRect(L.win.x + st.x, L.win.y + st.y, 1, 1);
+    }
+  });
+  // редкая падающая звезда: три пикселя наискось внутри верхней створки
+  if (!meteor && Math.random() < .0025) meteor = { x: 2 + Math.random() * 10, y: 1 + Math.random() * 3, t0: now() };
+  if (meteor) {
+    const k = (now() - meteor.t0) / 450;
+    if (k >= 1) meteor = null;
+    else {
+      const mx = L.win.x + Math.round(meteor.x + k * 10), my = L.win.y + Math.round(meteor.y + k * 5);
+      for (let i = 0; i < 3; i++) {
+        const px = mx - i, py = my - (i >> 1);
+        if (px > L.win.x && px < L.win.x + 25 && py > L.win.y && py < L.win.y + 9) {
+          ctx.fillStyle = i ? '#8fa2c8' : '#ffffff'; ctx.fillRect(px, py, 1, 1);
+        }
+      }
+    }
+  }
+}
+// показываем четыре доски: две рабочие и две под апгрейд — стена не пустует
+// и видно, куда растёт лавка (в релизе досок двенадцать)
+const SHELF_SHOWN = 4;
+function drawShelves() {
+  const s = L.shelf;
+  panel(s.x, s.y, s.w, s.h);
+  text('ПОЛКИ', s.x + 3, s.y + 2, '#c9b8e0');
+  // доске нужно не меньше 15 пикселей: иначе подпись садится на полку
+  const shown = Math.max(state.shelves.length, Math.min(SHELF_SHOWN, Math.floor((s.h - 11) / 15)));
+  const rowH = Math.floor((s.h - 11) / shown);
+  for (let i = 0; i < shown; i++) {
+    const ry = s.y + 10 + i * rowH;
+    const baseY = ry + rowH - 3, cy = ry + 4;
+    ctx.fillStyle = '#5a4230'; ctx.fillRect(s.x + 2, baseY, s.w - 4, 2);
+    ctx.fillStyle = '#3a2a1c'; ctx.fillRect(s.x + 2, baseY + 2, s.w - 4, 1);
+    const sh = state.shelves[i];
+    if (!sh) {                                    // доска под апгрейд — покупается тапом
+      const price = SHELF_PRICES[Math.min(SHELF_PRICES.length - 1, i - 2)];
+      const can = state.coins >= price;
+      text(fitText('+ ПОЛКА ' + price, s.w - 10), s.x + 5, cy + 1, can ? '#8ee0a0' : '#6a5a82');
+      pushHit(s.x, ry, s.w, rowH, () => {
+        if (state.coins < price) { say('Не хватает: полка стоит ' + price + '.'); SFX.error({ v: .5 }); return; }
+        state.coins -= price;
+        state.shelves.push({ potion: null, n: 0, t0: 0 });
+        SFX.coins({ n: 4 }); say('Новая полка. Назначь зелье.'); saveGame();
+      });
+      continue;
+    }
+    if (sh.potion) {
+      const shown = Math.min(sh.n, Math.max(1, Math.floor((s.w - 30) / 7)));
+      for (let k = 0; k < shown; k++) {
+        const vx = s.x + 4 + k * 7;
+        spr('sm_' + sh.potion, vx, cy);
+        // ночью склянки светятся изнутри — тезис арта; днём свет из окна их гасит
+        if (state.phase === 'night' && (F4 + k * 2 + i) % 5 === 0) {
+          ctx.fillStyle = EL[sh.potion].p[2];
+          ctx.fillRect(vx - 1, cy + 4, 1, 1); ctx.fillRect(vx + 5, cy + 3, 1, 1);
+        }
+      }
+      const cnt = sh.n + '/' + SHELF_CAP;
+      const nx = s.x + 6 + shown * 7;
+      const nmax = (s.x + s.w - 4 - textW(cnt)) - nx - 3;
+      if (nmax > 8) text(fitText(EL[sh.potion].n, nmax), nx, cy + 1, '#e8dcf5');
+      textR(cnt, s.x + s.w - 4, cy + 1, '#9a86b5');
+      if (sh.n < SHELF_CAP) {
+        const per = shelfSec(sh.potion) * 1000;
+        meter(s.x + 3, ry, s.w - 6, ((now() - sh.t0) % per) / per, '#5fc9a8');
+      }
+    } else {
+      text('ПУСТО — ТАП', s.x + 5, cy + 1, '#6a5a82');
+    }
+    pushHit(s.x, ry, s.w, rowH, () => assignShelf(i));
+  }
+  // пучки трав под полками — только в ландшафте, в портрете там полоса вывески
+  if (L.land) {
+    spr('herb', s.x + 9, s.y + s.h + 1);
+    spr('herb', s.x + s.w - 16, s.y + s.h + 1);
+  }
+}
+function drawCauldron() {
+  const c = L.cau;
+  // при реакции котёл вздрагивает на один пиксель
+  const jx = reacting && F8 % 2 ? 1 : 0;
+  spr('cauldron', c.x + jx, c.y);
+  // огонь рисуется поверх низа котла — языки лижут бока, два кадра.
+  // Днём очаг тлеет: видны только угли — знак, что склянки ждут ночи
+  const fx = c.x + ((c.w - SW('fire0')) >> 1), fy = c.y + c.h - 7;
+  if (state.phase === 'night') spr(F4 % 2 ? 'fire1' : 'fire0', fx, fy);
+  else ctx.drawImage(SPRITES[F4 % 2 ? 'fire1' : 'fire0'], 0, 5, SW('fire0'), 2, fx, fy + 5, SW('fire0'), 2);
+  // жидкость в горловине с бегущим бликом
+  const lx = c.x + jx + 6, ly = c.y + 2, lw = c.w - 12;
+  let liq = '#22303a', hi = null;
+  if (reacting) { liq = (F8 % 2 ? EL[reacting.a] : EL[reacting.b]).p[0]; hi = '#f0e6d2'; }
+  else if (state.brew) { liq = EL[state.brew.id].p[0]; hi = EL[state.brew.id].p[2]; }
+  else if (state.slots[0]) { liq = EL[state.slots[0]].p[1]; hi = EL[state.slots[0]].p[0]; }
+  ctx.fillStyle = liq; ctx.fillRect(lx, ly, lw, 2);
+  if (hi) { ctx.fillStyle = hi; ctx.fillRect(lx + 1 + (F4 * 5) % (lw - 4), ly, 3, 1); }
+  // пузырьки на поверхности
+  for (const bl of blips) {
+    if (bl.age < 0) continue;
+    ctx.fillStyle = bl.age % 2 ? '#f0e6d2' : (hi || '#8fa2ac');
+    ctx.fillRect(c.x + jx + (c.w >> 1) + bl.dx, ly - (bl.age > 2 ? 1 : 0), 1, 1);
+  }
+  if (state.brew) {
+    const p = Math.min(1, (now() - state.brew.t0) / (state.brew.sec * 1000));
+    meter(c.x + 4, c.y + c.h - 3, c.w - 8, p, '#f0d060');
+  }
+  // основа покачивается над горловиной; тап по котлу выплёскивает её
+  if (state.slots[0] && !reacting) spr('el_' + state.slots[0], potMouth().x - 6, c.y - 10 - (F4 % 2));
+  pushHit(c.x - 8, c.y - 24, c.w + 16, c.h + 24, pullBase);
+  // журнал на подставке — он же меню, отдельной кнопки нет
+  const b = L.book;
+  ctx.fillStyle = '#3a2a1c'; ctx.fillRect(b.x - 1, b.y + SH('book'), SW('book') + 2, 2);
+  spr('book', b.x, b.y);
+  text('ЖУРНАЛ', Math.max(1, b.x - 4), b.y - 9, '#9a86b5');
+  pushHit(b.x - 5, b.y - 12, SW('book') + 10, SH('book') + 18, () => { ui = 'journal'; SFX.open({ v: .6 }); });
+  // свечи горят только ночью
+  if (state.phase === 'night') (L.candles || []).forEach((cd, i) => {
+    spr('candle', cd.x, cd.y);
+    spr((F4 + i) % 2 ? 'cf1' : 'cf0', cd.x + 1, cd.y - 4);
+  });
+}
+// эффекты поверх сцены: полёт в котёл, искры, пшик, пар
+function drawFx(dt) {
+  flyers.forEach(f => { f.t += dt; });
+  const done = flyers.filter(f => f.t >= f.dur);
+  flyers = flyers.filter(f => f.t < f.dur);
+  done.forEach(f => f.cb());
+  for (const f of flyers) {
+    const k = f.t / f.dur;
+    const x = Math.round(f.x0 + (f.x1 - f.x0) * k);
+    const y = Math.round(f.y0 + (f.y1 - f.y0) * k - 16 * Math.sin(Math.PI * k));
+    spr('el_' + f.id, x - 6, y - 6);
+  }
+  sparks = sparks.filter(s => (s.t += dt) < s.life);
+  for (const s of sparks) {
+    const k = s.t / s.life;
+    ctx.fillStyle = s.cols[Math.min(s.cols.length - 1, (k * s.cols.length) | 0)];
+    ctx.fillRect(Math.round(s.x + s.vx * s.t), Math.round(s.y + s.vy * s.t + 60 * s.t * s.t), 1, 1);
+  }
+  puffs = puffs.filter(p => (p.t += dt) < p.life);
+  for (const p of puffs) {
+    const k = p.t / p.life;
+    ctx.fillStyle = k < .4 ? '#c4c0cf' : k < .75 ? '#8b8798' : '#565266';
+    const sz = k < .5 ? 2 : 1;
+    ctx.fillRect(Math.round(p.x + ((p.x % 2) ? 3 : -3) * k), Math.round(p.y - 10 * k), sz, sz);
+  }
+  for (const w of wisps) {
+    ctx.fillStyle = w.age < 3 ? '#c9c2d8' : w.age < 6 ? '#948aa8' : '#655a7d';
+    ctx.fillRect(w.x, w.y, w.age < 4 ? 2 : 1, w.age < 4 ? 2 : 1);
+  }
+  coinsFly = coinsFly.filter(c => (c.t += dt) < c.dur);
+  for (const c of coinsFly) {
+    if (c.t < 0) continue;
+    const k = c.t / c.dur;
+    ctx.drawImage(SPRITES.coin, Math.round(c.x0 + (7 - c.x0) * k),
+                  Math.round(c.y0 + (6 - c.y0) * k - 18 * Math.sin(Math.PI * k)));
+  }
+}
+// пар и пузырьки живут на кадровом счётчике F8, не на времени
+function tickFx() {
+  wisps.forEach(w => { w.age++; w.y--; w.x += ((w.x + w.age) % 3) - 1; });
+  wisps = wisps.filter(w => w.age < 9);
+  const busy = state.brew || reacting;
+  if (busy && Math.random() < .2) SFX.bubble({ v: .4 });
+  if ((busy && Math.random() < .8) || (state.slots[0] && Math.random() < .2)) {
+    const m = potMouth();
+    wisps.push({ x: m.x + ((Math.random() * (L.cau.w - 16)) | 0) - ((L.cau.w - 16) >> 1), y: m.y - 3, age: 0 });
+  }
+  blips.forEach(b => b.age++);
+  blips = blips.filter(b => b.age < 5);
+  if (busy && blips.length < 4) addBlips(1);
+}
+function drawCounter() {
+  const c = L.cnt;
+  const cusH = L.cusH;
+  /* Покупатели рисуются ДО стойки: она перекрывает им ноги, и они стоят за
+     прилавком, а не на нём. Приходят справа за 0,4 с, дышат на пиксель,
+     уходят вправо за 0,45 с — очередь живёт, а не телепортируется. */
+  const ease = k => 1 - (1 - k) * (1 - k);
+  const posX = (i, q) => {
+    const slot = c.x + 3 + i * 13, k = Math.min(1, (now() - q.t0) / 400);
+    return Math.round(slot + (LW - slot) * (1 - ease(k)));
+  };
+  const breath = i => (F4 + i * 2) % 6 < 3 ? 0 : 1;
+  leavers = leavers.filter(lv => now() - lv.t0 < 450);
+  leavers.forEach(lv => {
+    const k = ease((now() - lv.t0) / 450);
+    spr('cus_' + lv.cid + (lv.v || 0), Math.round(lv.x + (LW - lv.x) * k), c.y - cusH + 2);
+  });
+  state.queue.forEach((q, i) => {
+    if (c.x + 3 + i * 13 + 12 > c.x + c.w) return;
+    spr('cus_' + q.cid + (q.v || 0), posX(i, q), c.y - cusH + 2 + breath(i));
+  });
+
+  // стойка: темнее пола и со своей кромкой, иначе сливается с досками
+  ctx.fillStyle = '#160f1f'; ctx.fillRect(c.x, c.y, c.w, c.h);
+  ctx.fillStyle = '#4a3320'; ctx.fillRect(c.x + 1, c.y + 1, c.w - 2, c.h - 2);
+  ctx.fillStyle = '#8a6640'; ctx.fillRect(c.x + 1, c.y + 1, c.w - 2, 2);
+  ctx.fillStyle = '#2f2013'; ctx.fillRect(c.x + 1, c.y + c.h - 2, c.w - 2, 1);
+  ctx.fillStyle = '#3d2b1a'; ctx.fillRect(c.x + 2, c.y + c.h, c.w - 4, 1);   // тень на полу
+
+  // пузыри и зоны тапа — поверх стойки
+  state.queue.forEach((q, i) => {
+    const cx = posX(i, q);
+    if (c.x + 3 + i * 13 + 12 > c.x + c.w) return;
+    if (i === 0 && now() - q.t0 > 400) {
+      // пузырь: только иконки — заказ понятен без чтения
+      const iw = q.want.length * 13 + 6;
+      const bx = Math.min(cx - 2, c.x + c.w - iw), by = c.y - cusH - 16;
+      ctx.fillStyle = '#160f1f'; ctx.fillRect(bx, by, iw, 15);
+      ctx.fillStyle = '#f0e6d2'; ctx.fillRect(bx + 1, by + 1, iw - 2, 13);
+      ctx.fillRect(bx + 4, by + 15, 3, 2);
+      q.want.forEach((w, k) => {
+        ctx.drawImage(SPRITES['el_' + w.id], bx + 3 + k * 13, by + 2, 12, 12);
+        if (w.n > 1) text('×' + w.n, bx + 3 + k * 13 + 6, by + 8, '#2f2340', null);
+      });
+    }
+    pushHit(cx - 1, c.y - cusH, 14, cusH + 4, () => serve(i));
+  });
+
+  // реплика первого в очереди — строкой на стойке, не в пузыре
+  const inner = c.w - 6;
+  if (state.queue.length) {
+    const q = state.queue[0];
+    const lines = wrapText(q.phrase, inner);
+    if (L.land || lines.length === 1) text(fitText(q.phrase, inner), c.x + 3, c.y + 4, '#f0e6d2');
+    else { text(fitText(lines[0], inner), c.x + 3, c.y + 1, '#f0e6d2'); text(fitText(lines[1] || '', inner), c.x + 3, c.y + 8, '#f0e6d2'); }
+  } else if (state.phase === 'day') {
+    text('ЖДЁМ ПОКУПАТЕЛЕЙ', c.x + 3, c.y + 4, '#c9b0a0');
+  } else {
+    // ночью на прилавке лежит прогноз: что понадобится завтра
+    const needs = planNeeds();
+    if (!needs.length) { text('НОЧЬ. ОТКРОЙ ЗЕЛЬЕ', c.x + 3, c.y + 4, '#c9b0a0'); }
+    else {
+      text('ЗАВТРА:', c.x + 3, c.y + 4, '#e8b04b');
+      let nx = c.x + 5 + textW('ЗАВТРА:');
+      needs.forEach(([id, n]) => {
+        if (nx + 12 > c.x + c.w - 2) return;
+        const have = stockOf(id) >= n;
+        spr('sm_' + id, nx, c.y + 3);
+        text(String(n), nx + 6, c.y + 4, have ? '#8ee0a0' : '#e0a08e');   // хватает ли запаса
+        nx += 6 + textW(String(n)) + 4;
+      });
+    }
+  }
+
+  // готовые склянки у прилавка
+  state.hand.forEach((id, k) => {
+    const hx = c.x + c.w - 11 - k * 7, hy = c.y - 8;     // стоят НА стойке, а не висят
+    if (hx < c.x + 2) return;
+    spr('sm_' + id, hx, hy);
+    if (state.phase === 'night' && (F4 + k * 3) % 5 === 0) {   // светятся, как и на полках
+      ctx.fillStyle = EL[id].p[2]; ctx.fillRect(hx - 1, hy + 4, 1, 1); ctx.fillRect(hx + 5, hy + 3, 1, 1);
+    }
+  });
+
+  // вывеска смены — сама кнопка: висит на верёвочках и переключает фазу
+  const lbl = state.phase === 'day' ? 'ЗАКРЫТЬ' : 'ОТКРЫТЬ';
+  const bw = textW(lbl) + 10, bh = 13;
+  const bx = L.signRow ? Math.floor((LW - bw) / 2) : LW - bw - 3;
+  const by = L.sign.y;
+  ctx.fillStyle = '#8a6640';
+  ctx.fillRect(bx + 2, by - 2, 1, 2); ctx.fillRect(bx + bw - 3, by - 2, 1, 2);
+  button(bx, by, bw, bh, lbl, state.phase === 'day' ? 'grey' : 'green',
+         () => { state.phase === 'day' ? closeDay() : openDay(); });
+}
+const restList = () => state.known.filter(id => !BASE.includes(id));
+function palCell(x, y, id, base) {
+  const active = state.slots[0] === id;           // основа в котле подсвечена золотом
+  ctx.fillStyle = active ? '#e8b04b' : '#4a3a63'; ctx.fillRect(x, y, L.CELL, L.CELL);
+  ctx.fillStyle = base ? '#463659' : '#3a2b4d'; ctx.fillRect(x + 1, y + 1, L.CELL - 2, L.CELL - 2);
+  spr('el_' + id, x + 2, y + 2);
+  pushHit(x, y, L.CELL, L.CELL, () => throwElement(id, x + 8, y + 2));
+}
+// строка состава: что в котле и чем кончилась прошлая реакция
+function drawMixLine(y, arrowsW) {
+  const a = state.slots[0];
+  let s, col = '#c9b8e0';
+  if (reacting) { s = EL[reacting.a].n + ' + ' + EL[reacting.b].n + (F4 % 2 ? '...' : '..'); col = '#f0e6d2'; }
+  else if (state.lastMix) {
+    const m = state.lastMix;
+    s = EL[m.a].n + ' + ' + EL[m.b].n + (m.r ? ' = ' + EL[m.r].n : ' — ПШИК');
+    if (m.r) col = '#f0e6d2';
+  } else if (a) s = 'В КОТЛЕ: ' + EL[a].n;
+  else s = 'БРОСЬ ЭЛЕМЕНТ В КОТЁЛ';
+  const right = state.known.length + '/' + Object.keys(EL).length;
+  const rw = textW(right);
+  const room = Math.max(8, LW - rw - arrowsW - 8);
+  // в портрете полная строка не влезает: результат важнее пары, пара видна в котле
+  if (textW(s) > room && state.lastMix && !reacting)
+    s = state.lastMix.r ? '= ' + EL[state.lastMix.r].n : 'ПШИК';
+  if (textW(s) > room && !a && !state.lastMix && !reacting) s = 'В КОТЁЛ';
+  text(fitText(s, room), 2, y, col);
+  textR(right, LW - 2 - arrowsW, y, '#9a86b5');
+}
+function drawPalette() {
+  const py = L.y1;
+  ctx.fillStyle = '#1c1528'; ctx.fillRect(0, py, LW, LH - py);
+  ctx.fillStyle = '#55446e'; ctx.fillRect(0, py, LW, 1);
+
+  const rest = restList();
+  const g = L.palGrid;
+  const maxScroll = Math.max(0, Math.ceil(rest.length / g.cols) - g.rows);
+  state.palScroll = Math.max(0, Math.min(maxScroll, state.palScroll));
+  drawMixLine(py + 1, maxScroll > 0 ? 22 : 0);
+  if (maxScroll > 0) {
+    if (state.palScroll > 0) button(LW - 21, py + 1, 9, 7, '-', 'grey', () => state.palScroll--);
+    if (state.palScroll < maxScroll) button(LW - 11, py + 1, 9, 7, '+', 'grey', () => state.palScroll++);
+  }
+
+  BASE.forEach((id, i) => palCell(L.palBase.x + i * L.PITCH, L.palBase.y, id, true));
+  ctx.fillStyle = '#8a6640'; ctx.fillRect(L.spine.x, L.spine.y, L.spine.w, L.spine.h);
+
+  const first = state.palScroll * g.cols;
+  for (let k = 0; k < g.cols * g.rows; k++) {
+    const idx = first + k;
+    if (idx >= rest.length) break;
+    palCell(g.x + (k % g.cols) * L.PITCH, g.y + Math.floor(k / g.cols) * L.PITCH, rest[idx], false);
+  }
+}
+let coinsShown = 0;
+function drawHUD() {
+  // счётчик докручивается к значению, а не прыгает: прибавка читается глазом
+  const dc = state.coins - coinsShown;
+  coinsShown += dc > 0 ? Math.max(1, Math.ceil(dc * .15)) : dc;
+  panel(2, 1, Math.max(38, textW(String(coinsShown)) + 14), 11);
+  spr('coin', 5, 4);
+  text(String(coinsShown), 12, 3, dc > 0 ? '#fff6dd' : '#ffe066');
+  const kn = state.known.filter(isPotion).length;
+  const mid = 'ЗЕЛЬЯ ' + kn + '/' + POTIONS.length;
+  if (LW > 150) textC(mid, LW / 2, 3, '#c9b8e0');
+  if (state.phase === 'day') {                    // обратный отсчёт до заката
+    const left = Math.max(0, DAY_SEC - Math.floor((now() - state.shiftT0) / 1000));
+    textR(Math.floor(left / 60) + ':' + String(left % 60).padStart(2, '0'), LW - 16, 3, left < 30 ? '#e0705a' : '#f0d060');
+  } else {
+    textR('НОЧЬ ' + state.day, LW - 16, 3, '#9a9ad0');
+  }
+  spr(state.muted ? 'spkOff' : 'spkOn', LW - 9, 3);
+  pushHit(LW - 12, 0, 12, 12, () => {
+    state.muted = !state.muted;
+    SFX.setMuted(state.muted);                    // setMuted(true) сам глушит музыку и эмбиент
+    if (!state.muted) { applyAudioPhase(); SFX.toggle({ on: true }); }
+  });
+}
+function drawToast() {
+  if (!state.toast) return;
+  if (now() > state.toast.until) { state.toast = null; return; }
+  // тост живёт под HUD: сцену внизу он не заслоняет. В портрете длинная
+  // фраза не влезает в строку, поэтому переносим по словам — до двух строк
+  const s = state.toast.s, maxW = LW - 8;
+  const lines = textW(s) <= maxW ? [s] : wrapText(s, maxW).slice(0, 2);
+  const w = Math.min(maxW, Math.max(...lines.map(textW)) + 8);
+  const h = 4 + lines.length * 8;
+  const x = Math.floor((LW - w) / 2), y = L.y0 + 1;
+  slab(x, y, w, h, '#e8d8b0', '#c9b688', '#f4ead0');   // пергаментная записка
+  lines.forEach((ln, i) => textC(fitText(ln, w - 6), LW / 2, y + 2 + i * 8, '#3a2a1c', null));
+}
+function drawFlash() {
+  if (!flash) return;
+  flash.t++;
+  if (flash.t > 90) { flash = null; return; }
+  const e = EL[flash.id];
+  const w = Math.min(LW - 14, Math.max(textW(e.n), textW('НОВАЯ ЗАПИСЬ В ЖУРНАЛЕ')) + 30);
+  const x = Math.floor((LW - w) / 2), y = L.y0 + 20;
+  // пергаментная карточка с золотой рамкой; рамка мерцает по кадровому счётчику
+  ctx.fillStyle = F4 % 2 ? '#e8b04b' : '#f0d060'; ctx.fillRect(x - 2, y - 2, w + 4, 32);
+  ctx.fillStyle = '#3a2a1c'; ctx.fillRect(x - 1, y - 1, w + 2, 30);
+  ctx.fillStyle = '#e8d8b0'; ctx.fillRect(x, y, w, 28);
+  ctx.fillStyle = '#f4ead0'; ctx.fillRect(x, y, w, 1);
+  ctx.drawImage(SPRITES['el_' + flash.id], x + 4, y + 7, 14, 14);
+  text('НОВАЯ ЗАПИСЬ В ЖУРНАЛЕ', x + 22, y + 4, '#8a6412', null);
+  text(fitText(e.n, w - 26), x + 22, y + 14, '#3a2a1c', null);
+}
+
+/* ── оверлеи ── */
+let ui = null;                                    // null, 'journal', 'shelf' или 'report'
+function dim() { ctx.fillStyle = ditherPat; ctx.fillRect(0, 0, LW, LH); }
+/* ── Журнал алхимика: пергамент, корешок, закладки-ярлычки ── */
+const TABS = [
+  { k: 'base', n: 'ОСНОВЫ', s: 'ОСН', col: '#c85a3a', ids: () => BASE },
+  { k: 'ing',  n: 'ИНГРЕД.', s: 'ИНГР', col: '#3a8ac8', ids: () => Object.keys(EL).filter(id => !BASE.includes(id) && !isPotion(id)) },
+  { k: 'pot',  n: 'ЗЕЛЬЯ',  s: 'ЗЕЛ', col: '#5fc95a', ids: () => POTIONS },
+];
+let jTab = 0, jPick = null;
+const recipeOf = id => RECIPES.find(r => r[2] === id);
+function drawJournal() {
+  dim();
+  const w = Math.min(LW - 6, 210), h = Math.min(LH - 16, 158);
+  const x = Math.floor((LW - w) / 2), y = Math.floor((LH - h) / 2);
+  // страницы пергамента и тёмный корешок
+  ctx.fillStyle = '#3a2a1c'; ctx.fillRect(x, y, w, h);
+  ctx.fillStyle = '#e8d8b0'; ctx.fillRect(x + 2, y + 2, w - 4, h - 4);
+  ctx.fillStyle = '#d0bd93'; ctx.fillRect(x + 2, y + 2, w - 4, 1);
+  const twoPage = w >= 150;
+  if (twoPage) { ctx.fillStyle = '#3a2a1c'; ctx.fillRect(x + Math.floor(w / 2) - 1, y + 2, 2, h - 4); }
+  textC('ЖУРНАЛ АЛХИМИКА', x + w / 2, y + 5, '#5a4230', null);
+
+  // закладки: ярлычки торчат из края книги
+  const tw = Math.floor((w - 8) / TABS.length);
+  TABS.forEach((t, i) => {
+    const tx = x + 4 + i * tw, ty = y + 13;
+    ctx.fillStyle = '#3a2a1c'; ctx.fillRect(tx, ty, tw - 2, 10);
+    ctx.fillStyle = i === jTab ? t.col : '#a89878'; ctx.fillRect(tx + 1, ty + 1, tw - 4, 8);
+    const lbl = textW(t.n) <= tw - 6 ? t.n : t.s;
+    textC(fitText(lbl, tw - 6), tx + (tw - 2) / 2, ty + 2, i === jTab ? '#f0e6d2' : '#3a2a1c', null);
+    pushHit(tx, ty, tw - 2, 10, () => { jTab = i; jPick = null; });
+  });
+
+  const ids = TABS[jTab].ids();
+  const openN = ids.filter(id => state.known.includes(id)).length;
+  text(openN + ' ИЗ ' + ids.length, x + 5, y + 26, '#7a6a4a', null);
+
+  // левая страница — оглавление; сетка не перетекает через корешок
+  const pageW = twoPage ? Math.floor(w / 2) - 1 : w;
+  const cols = Math.max(3, Math.floor((pageW - 10) / 18));
+  const gy = y + 35, gBot = y + h - (twoPage ? 16 : (jPick && isPotion(jPick) ? 54 : 28));
+  const rows = Math.max(1, Math.floor((gBot - gy) / 18));
+  ids.forEach((id, i) => {
+    if (i >= cols * rows) return;
+    const cx = x + 5 + (i % cols) * 18, cy = gy + Math.floor(i / cols) * 18;
+    const open = state.known.includes(id);
+    ctx.fillStyle = '#a89878'; ctx.fillRect(cx, cy, 16, 16);
+    ctx.fillStyle = open ? '#e8d8b0' : '#c0b090'; ctx.fillRect(cx + 1, cy + 1, 14, 14);
+    if (open) spr('el_' + id, cx + 2, cy + 2);
+    else textC('?', cx + 8, cy + 5, '#8a7a5a', null);
+    if (jPick === id) { ctx.fillStyle = TABS[jTab].col; ctx.fillRect(cx, cy, 16, 1); ctx.fillRect(cx, cy + 15, 16, 1); }
+    if (open) pushHit(cx, cy, 16, 16, () => { jPick = jPick === id ? null : id; });
+  });
+
+  // правая страница — страница выбранного элемента (в портрете её место внизу)
+  const drawPage = (px, py, pw) => {
+    if (!jPick) { text('ТАП ПО ЗАПИСИ —', px, py, '#a89878', null); text('ОТКРОЕТСЯ СТРАНИЦА', px, py + 8, '#a89878', null); return; }
+    ctx.drawImage(SPRITES['el_' + jPick], px, py, 24, 24);      // целый множитель ×2
+    // название переносим по словам, а не обрезаем: «ЭЛИКСИР ЗРЕНИЯ» должен читаться целиком
+    wrapText(EL[jPick].n, pw - 30).slice(0, 2).forEach((ln, k) => text(ln, px + 28, py + 3 + k * 9, '#3a2a1c', null));
+    const r = recipeOf(jPick);
+    let ly = py + 28;
+    wrapText(r ? EL[r[0]].n + ' + ' + EL[r[1]].n : 'БАЗОВЫЙ ЭЛЕМЕНТ', pw).slice(0, 2)
+      .forEach(ln => { text(ln, px, ly, '#7a6a4a', null); ly += 9; });
+    ly += 2;
+    if (isPotion(jPick)) {
+      text('ЦЕНА ' + priceOf(jPick), px, ly, '#8a6412', null); ly += 9;
+      text('ВАРКА ' + brewSec(jPick) + ' С', px, ly, '#8a6412', null); ly += 9;
+      const sh = state.shelves.find(s => s.potion === jPick);
+      text(sh ? 'НА ПОЛКЕ ' + sh.n + '/' + SHELF_CAP : 'НЕ НА ПОЛКЕ', px, ly, '#7a6a4a', null); ly += 11;
+    }
+    const uses = RECIPES.filter(q => (q[0] === jPick || q[1] === jPick) && state.known.includes(q[2]));
+    text('ВХОДИТ В:', px, ly, '#5a4230', null); ly += 9;
+    if (!uses.length) text('ПОКА НЕИЗВЕСТНО', px, ly, '#a89878', null);
+    uses.slice(0, 4).forEach(q => { text(fitText('— ' + EL[q[2]].n, pw), px, ly, '#7a6a4a', null); ly += 8; });
+  };
+  if (twoPage) drawPage(x + Math.floor(w / 2) + 5, gy, pageW - 10);
+  else {
+    const pot = jPick && isPotion(jPick);
+    const ly = y + h - (pot ? 52 : 26);
+    ctx.fillStyle = '#d0bd93'; ctx.fillRect(x + 3, ly - 2, w - 6, 1);
+    if (jPick) {
+      const r = recipeOf(jPick);
+      text(fitText(EL[jPick].n, w - 10), x + 5, ly, '#3a2a1c', null);
+      text(fitText(r ? EL[r[0]].n + ' + ' + EL[r[1]].n : 'БАЗОВЫЙ ЭЛЕМЕНТ', w - 10), x + 5, ly + 8, '#7a6a4a', null);
+      if (pot) {              // одностраничный режим терял цену, варку и полку
+        text(fitText('ЦЕНА ' + priceOf(jPick) + '  ВАРКА ' + brewSec(jPick) + ' С', w - 10), x + 5, ly + 17, '#8a6412', null);
+        const sh = state.shelves.find(s => s.potion === jPick);
+        text(sh ? 'НА ПОЛКЕ ' + sh.n + '/' + SHELF_CAP : 'НЕ НА ПОЛКЕ', x + 5, ly + 26, '#7a6a4a', null);
+      }
+    } else text('ТАП ПО ЗАПИСИ — РЕЦЕПТ', x + 5, ly + 4, '#a89878', null);
+  }
+  textR(jTab + 1 + ' / ' + TABS.length, x + w - 5, y + 26, '#a89878', null);
+  /* Подсказка за rewarded — главный рекламный слот по спеке. Логика та же,
+     что фронт в валидаторе дерева: неиспробованная пара известных с новым
+     результатом, раскрытая наполовину. Здесь заглушка без рекламы. */
+  button(x + 4, y + h - 13, 68, 11, 'ПОДСКАЗКА', 'purple', () => {
+    const ks = state.known, cands = [];
+    for (let i = 0; i < ks.length; i++) for (let j = i + 1; j < ks.length; j++) {
+      const k = key2(ks[i], ks[j]), r = RMAP[k];
+      if (r && !state.tried.has(k) && !state.known.includes(r)) cands.push([ks[i], ks[j]]);
+    }
+    if (!cands.length) { say('Подсказывать нечего — всё открыто.'); return; }
+    const [a, b] = pick(cands);
+    const kind = BASE.includes(b) ? 'из основ' : isPotion(b) ? 'из зелий' : 'из ингредиентов';
+    SFX.spell({ v: .5 }); say('Попробуй ' + EL[a].n + ' с чем-то ' + kind + '.', 3200);
+    ui = null; jPick = null;
+  });
+  button(x + w - 60, y + h - 13, 56, 11, 'ЗАКРЫТЬ', 'grey', () => { ui = null; jPick = null; SFX.close({ v: .5 }); });
+}
+let shelfIdx = 0;
+function assignShelf(i) {
+  const known = POTIONS.filter(p => state.known.includes(p));
+  if (!known.length) { say('Сначала открой зелье.'); return; }
+  shelfIdx = i; ui = 'shelf';
+}
+function drawShelfPick() {
+  dim();
+  const known = POTIONS.filter(p => state.known.includes(p));
+  const w = Math.min(LW - 8, 170), rowsH = known.length * 15 + 32;
+  const h = Math.min(LH - 16, rowsH);
+  const x = Math.floor((LW - w) / 2), y = Math.floor((LH - h) / 2);
+  slab(x, y, w, h, '#3a2b4d', '#241b33', '#55446e');
+  textC('НА ПОЛКУ ' + (shelfIdx + 1), x + w / 2, y + 4, '#ffe066');
+  known.forEach((id, i) => {
+    const ry = y + 14 + i * 15;
+    if (ry + 13 > y + h - 14) return;
+    slab(x + 3, ry, w - 6, 13, '#4a3560', '#2e2040', '#63487d');
+    spr('sm_' + id, x + 6, ry + 2);
+    text(fitText(EL[id].n, w - 60), x + 14, ry + 3, '#f0e6d2');
+    textR(shelfSec(id) + 'С', x + w - 6, ry + 3, '#9a86b5');
+    pushHit(x + 3, ry, w - 6, 13, () => {
+      const sh = state.shelves[shelfIdx];
+      sh.potion = id; sh.n = 0; sh.t0 = now(); ui = null;
+      SFX.select(); say(EL[id].n + ' на полке.');
+    });
+  });
+  button(x + Math.floor((w - 60) / 2), y + h - 13, 60, 11, 'ОТМЕНА', 'grey', () => { ui = null; });
+}
+function drawReport() {
+  dim();
+  const r = state.report;
+  const needs = r.next || [];
+  const w = Math.min(LW - 8, 168), h = 104;
+  const x = Math.floor((LW - w) / 2), y = Math.floor((LH - h) / 2);
+  slab(x, y, w, h, '#3a2b4d', '#241b33', '#55446e');
+  textC('ЗАКАТ. ДЕНЬ ' + r.day + ' СВЕДЁН', x + w / 2, y + 4, '#ffe066');
+  const rows = [
+    ['ПРОДАНО', r.sold], ['ВЫРУЧКА', r.coins],
+    ['ОТКРЫТО', r.found], ['УШЛО НИ С ЧЕМ', r.left],
+  ];
+  rows.forEach(([k, v], i) => {
+    text(k, x + 5, y + 15 + i * 9, '#c9b8e0');
+    textR(String(v), x + w - 5, y + 15 + i * 9, '#f0e6d2');
+  });
+  // упущенная выгода — единственное «наказание» за незаготовленную ночь
+  if (r.missed > 0) {
+    text('УПУЩЕНО', x + 5, y + 51, '#e0a08e');
+    textR('~' + r.missed, x + w - 5, y + 51, '#e0a08e');
+  }
+  // прогноз на завтра: кто в нём, тот и придёт
+  ctx.fillStyle = '#55446e'; ctx.fillRect(x + 4, y + 61, w - 8, 1);
+  text('ЗАВТРА ЖДУТ', x + 5, y + 64, '#e8b04b');
+  let nx = x + 7 + textW('ЗАВТРА ЖДУТ');
+  needs.forEach(([id, n]) => {
+    if (nx + 12 > x + w - 4) return;
+    spr('sm_' + id, nx, y + 63);
+    text(String(n), nx + 6, y + 64, '#f0e6d2');
+    nx += 6 + textW(String(n)) + 4;
+  });
+  // «×2» одноразовый: повторные тапы удваивали бы выручку экспоненциально
+  if (!r.doubled) button(x + 4, y + h - 26, w - 8, 11, '×2 ЗА РЕКЛАМУ', 'purple', () => {
+    state.coins += r.coins; r.coins *= 2; r.doubled = true;
+    SFX.coins({ n: 6 }); say('Заглушка: выручка удвоена.');
+  });
+  else button(x + 4, y + h - 26, w - 8, 11, 'ВЫРУЧКА УДВОЕНА', 'grey', null);
+  button(x + Math.floor((w - 70) / 2), y + h - 13, 70, 11, 'В НОЧЬ', 'green', () => { state.report = null; });
+}
+
+/* ═══════════════ Ввод: волочение и «тап-тап» ═══════════════ */
+let drag = null, downAt = null;
+function toLogical(e) {
+  const r = screenCv.getBoundingClientRect();
+  return { x: Math.floor((e.clientX - r.left) / r.width * LW), y: Math.floor((e.clientY - r.top) / r.height * LH) };
+}
+function cellAt(p) {                              // ячейка палитры под точкой
+  const bb = L.palBase;
+  if (p.x >= bb.x && p.y >= bb.y && p.y < bb.y + L.CELL) {
+    const c = Math.floor((p.x - bb.x) / L.PITCH);
+    if (c >= 0 && c < 4) return BASE[c];
+  }
+  const g = L.palGrid;
+  if (p.x < g.x || p.y < g.y) return null;
+  const col = Math.floor((p.x - g.x) / L.PITCH), row = Math.floor((p.y - g.y) / L.PITCH);
+  if (col >= g.cols || row >= g.rows) return null;
+  const rest = restList();
+  const idx = (state.palScroll + row) * g.cols + col;
+  return idx < rest.length ? rest[idx] : null;
+}
+function overCauldron(p) {
+  const c = L.cau;
+  return p.x >= c.x - 8 && p.x < c.x + c.w + 8 && p.y >= c.y - 24 && p.y < c.y + c.h + 4;
+}
+screenCv.addEventListener('pointerdown', e => {
+  const p = toLogical(e);
+  downAt = p;
+  if (!ui && !state.report) {
+    const id = cellAt(p);
+    if (id) { drag = { id, x: p.x, y: p.y, moved: false }; return; }
+    if (p.y >= L.y1) drag = { id: null, x: p.x, y: p.y, moved: false };   // свайп палитры
+  }
+});
+screenCv.addEventListener('pointermove', e => {
+  if (!drag) return;
+  const p = toLogical(e);
+  if (Math.abs(p.x - drag.x) > 2 || Math.abs(p.y - drag.y) > 2) drag.moved = true;
+  drag.x = p.x; drag.y = p.y;
+});
+screenCv.addEventListener('pointerup', e => {
+  const p = toLogical(e);
+  let handled = false;
+  if (drag) {
+    const swipe = () => {                         // свайп по палитре листает её
+      if (!downAt || p.y < L.y1 - 4) return;
+      const d = L.land ? downAt.x - p.x : downAt.y - p.y;
+      if (Math.abs(d) > 8) state.palScroll += d > 0 ? 1 : -1;
+    };
+    if (drag.id) {                                // тап-тап или волочение элемента
+      handled = true;
+      if (drag.moved && overCauldron(p)) throwElement(drag.id, p.x, p.y);
+      else if (!drag.moved) throwElement(drag.id, drag.x, drag.y - 6);
+      else swipe();                               // жест обычно начинается с ячейки
+    } else if (drag.moved) {
+      handled = true;
+      swipe();
+    }
+    drag = null;                                  // пустой тап падает дальше, к кнопкам
+  }
+  if (!handled) {
+    for (let i = hits.length - 1; i >= 0; i--) {
+      const h = hits[i];
+      if (p.x >= h.x && p.x < h.x + h.w && p.y >= h.y && p.y < h.y + h.h) { h.fn(); break; }
+    }
+  }
+  downAt = null;
+});
+screenCv.addEventListener('pointercancel', () => { drag = null; downAt = null; });
+document.addEventListener('contextmenu', e => e.preventDefault());
+
+/* ═══════════════ Кадр ═══════════════ */
+let lastT = 0;
+function frame(t) {
+  const dt = Math.min((t - lastT) / 1000, .05); lastT = t; animT += dt;
+  if (LW < 1 || LH < 1 || !L) { requestAnimationFrame(frame); return; }
+  F4 = Math.floor(animT * 4); F8 = Math.floor(animT * 8);
+  if (F8 !== prevF8) { prevF8 = F8; tickFx(); }
+
+  // реакция в котле разрешается после бурления
+  if (reacting && now() - reacting.t0 > 620) { const rx = reacting; reacting = null; resolveMix(rx.a, rx.b); }
+  tickBrew(); tickShelves(); tickQueue();
+  if (now() - lastSave > 5000) { lastSave = now(); saveGame(); }
+
+  hits = [];
+  ctx.clearRect(0, 0, LW, LH);
+  drawRoom();
+  drawShelves();
+  drawCauldron();
+  drawCounter();
+  drawPalette();
+  drawFx(dt);
+  drawHUD();
+  drawToast();
+  drawFlash();
+  if (state.report) drawReport();
+  else if (ui === 'journal') drawJournal();
+  else if (ui === 'shelf') drawShelfPick();
+  if (drag && drag.id && drag.moved) ctx.drawImage(SPRITES['el_' + drag.id], drag.x - 6, drag.y - 6, 12, 12);
+
+  sctx.drawImage(buf, 0, 0, LW, LH, 0, 0, LW * S, LH * S);
+  requestAnimationFrame(frame);
+}
+
+/* ═══════════════ Запуск ═══════════════ */
+buildFont();
+buildSprites();
+resize();
+buildDither();
+buildHolePats();
+if (!loadGame()) { makePlan(); say('Ночь. Брось два элемента в котёл.', 3000); }
+else if (!state.plan.length) makePlan();
+coinsShown = state.coins;
+applyAudioPhase();
+requestAnimationFrame(t => { lastT = t; frame(t); });
+</script>
+</body>
+</html>

@@ -1,0 +1,714 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Зверята: Мердж Кликер</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body {
+    height: 100%; overflow: hidden; background: #8e3b60;
+    /* п.1.10.2: без swipe-to-refresh и bounce-скролла, без iOS-меню по долгому тапу */
+    overscroll-behavior: none; touch-action: none; -webkit-touch-callout: none;
+  }
+  body { font-family: 'Segoe UI', Roboto, Arial, sans-serif; user-select: none; -webkit-user-select: none; }
+  #game { position: fixed; inset: 0; touch-action: none; display: block; }
+  .modal {
+    position: fixed; inset: 0; display: none; align-items: center; justify-content: center;
+    background: rgba(46, 16, 36, .75); z-index: 10; backdrop-filter: blur(4px);
+  }
+  .modal.show { display: flex; }
+  .panel {
+    background: #6b2c4f; border-radius: 20px; padding: 28px 32px; text-align: center;
+    color: #fff; box-shadow: 0 12px 40px rgba(0,0,0,.5); max-width: 320px; width: 86%;
+    animation: pop .25s ease-out;
+  }
+  @keyframes pop { from { transform: scale(.8); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+  .panel h2 { font-size: 24px; margin-bottom: 6px; }
+  .panel .sc { font-size: 40px; font-weight: 800; color: #ffd54a; margin: 8px 0 2px; }
+  .panel .bs { font-size: 15px; color: #e8b7cd; margin-bottom: 18px; }
+  .btn {
+    display: block; width: 100%; min-height: 48px; border: 0; border-radius: 14px; padding: 14px 18px;
+    font-size: 17px; font-weight: 700; cursor: pointer; margin-top: 10px; color: #fff;
+    transition: transform .1s;
+  }
+  .btn:active { transform: scale(.96); }
+  .btn-green { background: linear-gradient(180deg, #4cd964, #2fae4a); }
+  .btn-blue  { background: linear-gradient(180deg, #5a9cff, #3a6fe0); }
+  .btn small { display: block; font-weight: 400; font-size: 12px; opacity: .85; }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+
+<div class="modal" id="offlineModal">
+  <div class="panel">
+    <h2 id="offTitle">Пока тебя не было</h2>
+    <div class="sc" id="offAmount">+0 🪙</div>
+    <div class="bs" id="offHint">зверята заработали для тебя</div>
+    <button class="btn btn-green" id="btnX2">🎬 Забрать x2<small>посмотреть рекламу</small></button>
+    <button class="btn btn-blue" id="btnCollect">Забрать</button>
+  </div>
+</div>
+
+<!-- sdk.js: только для Яндекс Игр -->
+<script>
+/* ===== Обёртка Yandex SDK (мок-режим локально) ===== */
+const YSDK = (() => {
+  let ysdk = null, player = null, readySent = false;
+  function fireReady() {
+    if (readySent) return;
+    // флаг ставим только когда ready() реально ушёл: иначе преждевременный вызов
+    // (например, из фолбэка по таймеру, пока SDK ещё не ответил) сжёг бы сигнал п.1.19
+    try {
+      if (ysdk && ysdk.features && ysdk.features.LoadingAPI) { ysdk.features.LoadingAPI.ready(); readySent = true; }
+    } catch (e) { readySent = true; }
+  }
+  async function init() {
+    if (typeof YaGames === 'undefined') return;
+    try {
+      ysdk = await Promise.race([YaGames.init(), new Promise((_, rej) => setTimeout(() => rej(0), 8000))]);
+    } catch (e) { ysdk = null; }
+    if (ysdk) {
+      try { player = await Promise.race([ysdk.getPlayer(), new Promise(r => setTimeout(() => r(null), 3000))]); }
+      catch (e) { player = null; }
+    }
+  }
+  // п.4.7: пауза и глушение звука ровно на время показа рекламы
+  function pauseForAd() {
+    try { Sound.setMuted(true); } catch (e) {}
+    try { ysdk && ysdk.features && ysdk.features.GameplayAPI && ysdk.features.GameplayAPI.stop(); } catch (e) {}
+  }
+  return {
+    init,
+    get lang() { try { return ysdk ? ysdk.environment.i18n.lang : (navigator.language || 'ru').slice(0, 2); } catch (e) { return 'ru'; } },
+    gameReady: fireReady,
+    gameplayStart() { ysdk?.features?.GameplayAPI?.start(); },
+    gameplayStop() { ysdk?.features?.GameplayAPI?.stop(); },
+    showInterstitial(onClose) {
+      if (!ysdk) { onClose?.(); return; }
+      this.gameplayStop();
+      Sound.setMuted(true);
+      ysdk.adv.showFullscreenAdv({ callbacks: {
+        onOpen: () => { Sound.suspend(); pauseForAd(); },
+        onClose: () => { Sound.resume(); Sound.setMuted(false); onClose?.(); },
+        onError: () => { Sound.resume(); Sound.setMuted(false); onClose?.(); },
+      }});
+    },
+    showRewarded(onReward, onClose) {
+      if (!ysdk) { onReward?.(); onClose?.(true); return; }
+      this.gameplayStop();
+      Sound.setMuted(true);
+      let ok = false;
+      ysdk.adv.showRewardedVideo({ callbacks: {
+        onOpen: () => { Sound.suspend(); pauseForAd(); },
+        onRewarded: () => { ok = true; onReward?.(); },
+        onClose: () => { Sound.resume(); Sound.setMuted(false); onClose?.(ok); },
+        onError: () => { Sound.resume(); Sound.setMuted(false); onClose?.(false); },
+      }});
+    },
+    async saveData(obj) {
+      if (player) { try { await player.setData(obj); return; } catch (e) {} }
+      try { localStorage.setItem('zveri_merge_save', JSON.stringify(obj)); } catch (e) {}
+    },
+    async loadData() {
+      if (player) { try { const d = await player.getData(); if (d && Object.keys(d).length) return d; } catch (e) {} }
+      try { return JSON.parse(localStorage.getItem('zveri_merge_save')) || {}; } catch (e) { return {}; }
+    },
+    setScore(score) {
+      if (!ysdk) return;
+      try { ysdk.leaderboards?.setScore?.('score', score)?.catch?.(() => {}); } catch (e) {}
+    },
+  };
+})();
+
+/* ===== Локализация ===== */
+const I18N = {
+  ru: {
+    title: 'Зверята: Мердж Кликер',
+    buy: 'Купить', noSpace: 'Нет места — соедини зверят!', perSec: '/сек',
+    offlineTitle: 'Пока тебя не было', offlineHint: 'зверята заработали для тебя',
+    collect: 'Забрать', collectX2: 'Забрать x2', watchAd: 'посмотреть рекламу',
+    boost: 'x2 доход · 2 мин', lvl: 'ур. ',
+  },
+  en: {
+    title: 'Animals: Merge Clicker',
+    buy: 'Buy', noSpace: 'No space — merge animals!', perSec: '/sec',
+    offlineTitle: 'While you were away', offlineHint: 'your animals kept earning',
+    collect: 'Collect', collectX2: 'Collect x2', watchAd: 'watch an ad',
+    boost: 'x2 income · 2 min', lvl: 'lvl ',
+  },
+};
+let T = I18N.ru, curLang = null;
+
+/* ===== Звук (WebAudio, без файлов) ===== */
+const Sound = (() => {
+  let ctx = null, muted = false;
+  function ac() { if (!ctx) ctx = new (window.AudioContext || window.webkitAudioContext)(); return ctx; }
+  function beep(freq, dur, type = 'sine', vol = .18, delay = 0) {
+    if (muted || document.hidden) return;
+    try {
+      const c = ac(), o = c.createOscillator(), g = c.createGain();
+      o.type = type; o.frequency.value = freq;
+      g.gain.setValueAtTime(vol, c.currentTime + delay);
+      g.gain.exponentialRampToValueAtTime(.001, c.currentTime + delay + dur);
+      o.connect(g); g.connect(c.destination);
+      o.start(c.currentTime + delay); o.stop(c.currentTime + delay + dur);
+    } catch (e) {}
+  }
+  return {
+    tap(level) { beep(300 + level * 30, .07, 'square', .09); },
+    move() { beep(240, .05, 'square', .06); },
+    merge(level) { beep(380 + level * 55, .12, 'triangle', .16); beep(560 + level * 70, .16, 'sine', .15, .08); },
+    buy() { beep(440, .08, 'square', .1); beep(660, .1, 'square', .08, .06); },
+    coins() { beep(660, .09, 'sine', .14); beep(880, .12, 'sine', .14, .07); beep(1100, .14, 'sine', .12, .14); },
+    deny() { beep(170, .12, 'sawtooth', .07); },
+    setMuted(m) { muted = m; },
+    unlock() { try { ac().resume(); } catch (e) {} },
+    suspend() { try { if (ctx) ctx.suspend(); } catch (e) {} },  // п.4.7
+    resume() { try { if (ctx) ctx.resume(); } catch (e) {} },
+  };
+})();
+
+/* ===== PURE_LOGIC_START ===== */
+const GRID_N = 4, CELLS = 16, MAX_LEVEL = 10;
+const OFFLINE_CAP_MS = 2 * 60 * 60 * 1000;
+const BUY_BASE = 10, BUY_GROWTH = 1.18;
+
+// «красивое» округление до 2 значащих цифр
+function niceRound(v) {
+  if (v <= 0) return 0;
+  const mag = Math.pow(10, Math.floor(Math.log10(v)) - 1);
+  return Math.round(v / mag) * mag;
+}
+
+// доход зверька уровня N: 1 * 2.2^(N-1), округлённый красиво
+function incomeOf(level) {
+  if (!level || level < 1) return 0;
+  return niceRound(Math.pow(2.2, level - 1));
+}
+
+function totalIncome(grid) {
+  let s = 0;
+  for (let i = 0; i < grid.length; i++) s += incomeOf(grid[i]);
+  return s;
+}
+
+// тап по зверьку: ~2 секунды его дохода
+function tapGain(level) { return Math.max(1, Math.round(incomeOf(level) * 2)); }
+
+function spawnLevelFor(bestLevel) { return Math.max(1, bestLevel - 3); }
+
+// цена покупки: база 10 × доход спавн-уровня, ×1.18 за каждую покупку
+function buyCost(spawnLevel, buyCount) {
+  return Math.max(1, Math.round(BUY_BASE * incomeOf(spawnLevel) * Math.pow(BUY_GROWTH, buyCount)));
+}
+
+// мердж/перемещение: мутирует grid, возвращает {ok, merged?, moved?, newLevel?}
+function tryMerge(grid, from, to) {
+  if (from === to || from < 0 || to < 0 || from >= grid.length || to >= grid.length) return { ok: false };
+  const a = grid[from], b = grid[to];
+  if (!a) return { ok: false };
+  if (!b) { grid[to] = a; grid[from] = 0; return { ok: true, moved: true }; }
+  if (a === b && a < MAX_LEVEL) { grid[to] = a + 1; grid[from] = 0; return { ok: true, merged: true, newLevel: a + 1 }; }
+  return { ok: false };
+}
+
+function firstEmpty(grid) {
+  for (let i = 0; i < grid.length; i++) if (!grid[i]) return i;
+  return -1;
+}
+
+// оффлайн-доход с капом 2 часа
+function offlineEarnings(elapsedMs, incomePerSec) {
+  const capped = Math.min(Math.max(0, elapsedMs), OFFLINE_CAP_MS);
+  return Math.floor(capped / 1000 * incomePerSec);
+}
+
+function makeSave(coins, grid, bestLevel, buyCount, ts) {
+  return { coins: Math.floor(coins), grid: grid.slice(), bestLevel, buyCount, ts };
+}
+
+function readSave(d) {
+  if (!d || !Array.isArray(d.grid) || d.grid.length !== CELLS) return null;
+  const grid = d.grid.map(v => {
+    v = Math.floor(Number(v) || 0);
+    return (v >= 1 && v <= MAX_LEVEL) ? v : 0;
+  });
+  const coins = Math.max(0, Math.floor(Number(d.coins) || 0));
+  let bestLevel = Math.floor(Number(d.bestLevel) || 1);
+  bestLevel = Math.max(1, Math.min(MAX_LEVEL, bestLevel));
+  for (const v of grid) if (v > bestLevel) bestLevel = v;
+  const buyCount = Math.max(0, Math.floor(Number(d.buyCount) || 0));
+  const ts = Number(d.ts) || 0;
+  return { coins, grid, bestLevel, buyCount, ts };
+}
+
+function formatNum(v) {
+  if (!isFinite(v) || v <= 0) return '0';
+  const c = x => x >= 100 ? String(Math.round(x)) : x >= 10 ? String(Math.round(x * 10) / 10) : String(Math.round(x * 100) / 100);
+  if (v >= 1e12) return c(v / 1e12) + 'T';
+  if (v >= 1e9) return c(v / 1e9) + 'B';
+  if (v >= 1e6) return c(v / 1e6) + 'M';
+  if (v >= 1e4) return c(v / 1e3) + 'K';
+  const r = Math.round(v * 10) / 10;
+  return Number.isInteger(r) ? String(r) : r.toFixed(1);
+}
+/* ===== PURE_LOGIC_END ===== */
+
+/* ===== Игровые константы ===== */
+const ANIMALS = ['', '🐭', '🐹', '🐰', '🦊', '🐻', '🐼', '🦁', '🐯', '🦄', '🐲'];
+const TINTS = [null, '#ffe9c9', '#ffe0b0', '#ffd6a3', '#ffc894', '#f7b98c', '#eaa98c', '#e69a94', '#dd8f9e', '#d489ae', '#c986c1'];
+const EMOJI_FONT = '"Segoe UI Emoji","Apple Color Emoji","Noto Color Emoji","Segoe UI",sans-serif';
+
+/* ===== Состояние ===== */
+let coins = 0, grid = new Array(CELLS).fill(0), bestLevel = 1, buyCount = 0;
+let displayCoins = 0, coinPulse = 0;
+let boostUntil = 0, boostReadyAt = 0;
+let lastAdTime = Date.now();
+let saveDirty = false, lastSaveAt = Date.now();
+let modalOpen = false, offlineAmount = 0;
+let inputEnabled = false;        // REQ-1.19: ввод открывается только после LoadingAPI.ready()
+let press = null;   // {slot, x, y}
+let drag = null;    // {slot, level, x, y}
+let particles = [], floats = [];
+const cardAnim = Array.from({ length: CELLS }, () => ({ pop: 9, bounce: 9 }));
+
+function markDirty() { saveDirty = true; }
+function doSave() {
+  lastSaveAt = Date.now(); saveDirty = false;
+  YSDK.saveData(makeSave(coins, grid, bestLevel, buyCount, Date.now()));
+}
+
+/* ===== Эффекты ===== */
+function addFloat(x, y, text, color = '#fff', size = 20) { floats.push({ x, y, text, color, size, t: 0 }); }
+function burst(i) {
+  const c = cellCenter(i);
+  for (let k = 0; k < 14; k++) {
+    const a = Math.random() * Math.PI * 2, sp = 60 + Math.random() * 180;
+    particles.push({ x: c.x, y: c.y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp - 40, t: 0,
+                     life: .45 + Math.random() * .3, color: k % 3 ? '#ffd54a' : '#fff', s: 3 + Math.random() * 4 });
+  }
+  particles.push({ ring: true, x: c.x, y: c.y, t: 0, life: .35 });
+}
+
+/* ===== Игровые действия ===== */
+function tapAnimal(i) {
+  const lvl = grid[i];
+  if (!lvl) return;
+  const gain = tapGain(lvl) * (Date.now() < boostUntil ? 2 : 1);
+  coins += gain;
+  coinPulse = 1;
+  cardAnim[i].bounce = 0;
+  const c = cellCenter(i);
+  addFloat(c.x + (Math.random() - .5) * 24, c.y - layout.cs * .34, '+' + formatNum(gain) + ' 🪙', '#fff', 20);
+  Sound.tap(lvl);
+  markDirty();
+}
+
+function handleDrop(from, to) {
+  const res = tryMerge(grid, from, to);
+  if (!res.ok) { Sound.deny(); return; }
+  if (res.merged) {
+    cardAnim[to].pop = 0;
+    burst(to);
+    const c = cellCenter(to);
+    addFloat(c.x, c.y - layout.cs * .32, ANIMALS[res.newLevel] + ' ' + T.lvl + res.newLevel, '#ffd54a', 22);
+    Sound.merge(res.newLevel);
+    if (res.newLevel > bestLevel) {
+      const before = spawnLevelFor(bestLevel);
+      bestLevel = res.newLevel;
+      if (spawnLevelFor(bestLevel) > before) buyCount = 0; // сброс цены: база пересчитается от дохода нового уровня
+      YSDK.setScore(bestLevel);
+      addFloat(layout.w / 2, layout.gridY - 22, '👑 ' + ANIMALS[bestLevel] + '!', '#fff', 26);
+    }
+    if (res.newLevel >= 5) maybeInterstitial(); // естественная пауза после крупного мерджа
+  } else {
+    Sound.move();
+  }
+  markDirty();
+}
+
+function tryBuy() {
+  const lvl = spawnLevelFor(bestLevel);
+  const cost = buyCost(lvl, buyCount);
+  const slot = firstEmpty(grid);
+  if (slot < 0 || coins < cost) { Sound.deny(); return; }
+  coins -= cost;
+  buyCount++;
+  grid[slot] = lvl;
+  cardAnim[slot].pop = 0;
+  burst(slot);
+  Sound.buy();
+  markDirty();
+}
+
+function tryBoost() {
+  const now = Date.now();
+  if (now < boostUntil) return;                       // уже активен
+  if (now < boostReadyAt) { Sound.deny(); return; }   // кулдаун
+  YSDK.showRewarded(() => {
+    boostUntil = Date.now() + 2 * 60 * 1000;
+    boostReadyAt = Date.now() + 3 * 60 * 1000;
+    coinPulse = 1;
+    Sound.coins();
+  }, () => {
+    lastAdTime = Date.now();
+    if (!modalOpen && !document.hidden) YSDK.gameplayStart();
+  });
+}
+
+function maybeInterstitial() {
+  const now = Date.now();
+  if (now - lastAdTime < 3 * 60 * 1000) return;
+  if (modalOpen || document.hidden) return;
+  lastAdTime = now;
+  // п. 4.4: показываем строго в момент паузы. Отложенный на 600 мс показ успевал прилететь поверх уже начатого хода
+  YSDK.showInterstitial(() => { if (!modalOpen && !document.hidden) YSDK.gameplayStart(); });
+}
+
+/* ===== Модалка оффлайн-дохода ===== */
+const offlineModal = document.getElementById('offlineModal');
+function showOffline(amount) {
+  offlineAmount = amount;
+  modalOpen = true;
+  setLang(YSDK.lang); // язык мог определиться позже старта или смениться на лету
+  YSDK.gameplayStop();
+  document.getElementById('offAmount').textContent = '+' + formatNum(amount) + ' 🪙';
+  offlineModal.classList.add('show');
+}
+function hideOffline() {
+  offlineModal.classList.remove('show');
+  modalOpen = false;
+  if (!document.hidden) YSDK.gameplayStart();
+  markDirty();
+  maybeInterstitial(); // естественная пауза: закрытие модалки (защищено lastAdTime)
+}
+document.getElementById('btnCollect').addEventListener('click', () => {
+  coins += offlineAmount;
+  coinPulse = 1;
+  Sound.coins();
+  hideOffline();
+});
+document.getElementById('btnX2').addEventListener('click', () => {
+  YSDK.showRewarded(() => {
+    coins += offlineAmount * 2;
+    coinPulse = 1;
+    Sound.coins();
+  }, (got) => {
+    lastAdTime = Date.now();
+    if (got) hideOffline(); // без награды модалка остаётся — можно забрать обычную сумму
+  });
+});
+function applyI18nDom() {
+  document.getElementById('offTitle').textContent = T.offlineTitle;
+  document.getElementById('offHint').textContent = T.offlineHint;
+  document.getElementById('btnX2').innerHTML = '🎬 ' + T.collectX2 + '<small>' + T.watchAd + '</small>';
+  document.getElementById('btnCollect').textContent = T.collect;
+  document.title = T.title;
+  document.documentElement.lang = curLang || 'ru';
+}
+/* Единая точка смены языка: и тексты в DOM, и <title>, и <html lang> (п. 8.2.3) */
+function setLang(lang) {
+  const raw = String(lang || 'ru').slice(0, 2).toLowerCase();
+  const code = I18N[raw] ? raw : 'en';
+  if (code === curLang) return;
+  curLang = code; T = I18N[code];
+  applyI18nDom();
+}
+
+/* ===== Рендер ===== */
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+let layout = {};
+
+function resize() {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const w = window.innerWidth, h = window.innerHeight;
+  canvas.width = w * dpr; canvas.height = h * dpr;
+  canvas.style.width = w + 'px'; canvas.style.height = h + 'px';
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+  const hudH = 92;
+  const btnH = 58, boostH = 46, bottomPad = 14, gap = 10;
+  const bottomArea = btnH + boostH + gap + bottomPad + 8;
+  const landscape = w > h * 1.25;
+  if (landscape) {
+    // широкий экран: поле слева, кнопки справа — иначе сетка ужимается в узкий квадрат по центру
+    const gridW = Math.min(h - 32, w * .52);
+    const panelW = Math.min(gridW * .85, Math.max(200, w - gridW - 72));
+    const colGap = 30;
+    const gridX = (w - (gridW + colGap + panelW)) / 2;
+    const gridY = (h - gridW) / 2;
+    const px = gridX + gridW + colGap;
+    // счётчик монет уезжает в правую колонку — всю высоту забирает поле
+    const hudBox = { x: px, y: gridY, w: panelW, h: 104 };
+    layout = {
+      w, h, hudH, gridW, gridX, gridY, cs: gridW / GRID_N, hudBox,
+      boostBtn: { x: px, y: gridY + gridW - btnH - gap - boostH, w: panelW, h: boostH },
+      buyBtn:   { x: px, y: gridY + gridW - btnH, w: panelW, h: btnH },
+    };
+  } else {
+    const gridW = Math.min(w - 28, h - hudH - bottomArea - 24, 620);
+    const gridX = (w - gridW) / 2;
+    const gridY = hudH + Math.max(8, (h - hudH - bottomArea - gridW) / 2);
+    layout = {
+      w, h, hudH, gridW, gridX, gridY, cs: gridW / GRID_N,
+      boostBtn: { x: gridX, y: h - bottomPad - btnH - gap - boostH, w: gridW, h: boostH },
+      buyBtn:   { x: gridX, y: h - bottomPad - btnH, w: gridW, h: btnH },
+    };
+  }
+}
+window.addEventListener('resize', resize);
+window.addEventListener('orientationchange', () => setTimeout(resize, 60)); // п.1.6.1.3
+
+function roundRect(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+function cellPos(i) {
+  const r = (i / GRID_N) | 0, c = i % GRID_N;
+  return { x: layout.gridX + c * layout.cs, y: layout.gridY + r * layout.cs };
+}
+function cellCenter(i) { const p = cellPos(i); return { x: p.x + layout.cs / 2, y: p.y + layout.cs / 2 }; }
+function cellAt(x, y) {
+  const c = Math.floor((x - layout.gridX) / layout.cs), r = Math.floor((y - layout.gridY) / layout.cs);
+  if (r < 0 || c < 0 || r >= GRID_N || c >= GRID_N) return -1;
+  return r * GRID_N + c;
+}
+function inRect(x, y, r) { return x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h; }
+function easeOutBack(p) { const c1 = 1.70158, c3 = c1 + 1; return 1 + c3 * Math.pow(p - 1, 3) + c1 * Math.pow(p - 1, 2); }
+function fmtTime(ms) { const s = Math.max(0, Math.ceil(ms / 1000)); return ((s / 60) | 0) + ':' + String(s % 60).padStart(2, '0'); }
+
+function drawButton(r, c1, c2, label, enabled) {
+  ctx.globalAlpha = enabled ? 1 : .45;
+  const g = ctx.createLinearGradient(0, r.y, 0, r.y + r.h);
+  g.addColorStop(0, c1); g.addColorStop(1, c2);
+  ctx.shadowColor = 'rgba(90,20,40,.3)'; ctx.shadowBlur = 8; ctx.shadowOffsetY = 3;
+  ctx.fillStyle = g;
+  roundRect(r.x, r.y, r.w, r.h, 14); ctx.fill();
+  ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
+  ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  // подпись ужимается под ширину кнопки: в альбомной сетка узкая и текст иначе вылезает за края
+  const maxW = r.w - 16;
+  let fs = 18;
+  ctx.font = '700 ' + fs + 'px ' + EMOJI_FONT;
+  while (fs > 9 && ctx.measureText(label).width > maxW) {
+    fs -= 1;
+    ctx.font = '700 ' + fs + 'px ' + EMOJI_FONT;
+  }
+  ctx.fillText(label, r.x + r.w / 2, r.y + r.h / 2 + 1);
+  ctx.globalAlpha = 1;
+}
+
+let lastT = 0;
+function frame(t) {
+  const dt = Math.min((t - lastT) / 1000, .1); lastT = t;
+  const now = Date.now();
+  const boosted = now < boostUntil;
+
+  // пассивный доход каждый кадр
+  const inc = totalIncome(grid) * (boosted ? 2 : 1);
+  coins += inc * dt;
+  const diff = coins - displayCoins;
+  displayCoins = diff < 1 ? coins : displayCoins + diff * Math.min(1, dt * 6);
+  coinPulse = Math.max(0, coinPulse - dt * 3);
+
+  const { w, h, gridX, gridY, cs } = layout;
+
+  // фон — закат
+  const bg = ctx.createLinearGradient(0, 0, 0, h);
+  bg.addColorStop(0, '#ffd194'); bg.addColorStop(.45, '#ff9a6c'); bg.addColorStop(1, '#8e3b60');
+  ctx.fillStyle = bg; ctx.fillRect(0, 0, w, h);
+  const sg = ctx.createRadialGradient(w * .5, h * .14, 10, w * .5, h * .14, w * .55);
+  sg.addColorStop(0, 'rgba(255,240,180,.5)'); sg.addColorStop(1, 'rgba(255,240,180,0)');
+  ctx.fillStyle = sg; ctx.fillRect(0, 0, w, h);
+
+  // HUD
+  const hb = layout.hudBox;
+  const hudCx = hb ? hb.x + hb.w / 2 : w / 2;
+  const hudY = hb ? hb.y + 46 : 50;
+  ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+  ctx.shadowColor = 'rgba(120,40,20,.35)'; ctx.shadowBlur = 8;
+  ctx.fillStyle = '#fff';
+  ctx.font = '800 ' + Math.round(34 * (1 + coinPulse * .1)) + 'px ' + EMOJI_FONT;
+  ctx.fillText('🪙 ' + formatNum(displayCoins), hudCx, hudY);
+  ctx.shadowBlur = 0; ctx.shadowColor = 'transparent';
+  ctx.font = '600 15px ' + EMOJI_FONT;
+  ctx.fillStyle = boosted ? '#ffec8a' : 'rgba(255,255,255,.9)';
+  ctx.fillText((boosted ? '⚡x2  ' : '') + '+' + formatNum(inc) + ' 🪙' + T.perSec, hudCx, hudY + 24);
+  ctx.font = '700 16px ' + EMOJI_FONT; ctx.fillStyle = '#fff';
+  if (hb) ctx.fillText('👑 ' + ANIMALS[bestLevel], hudCx, hudY + 50);
+  else { ctx.textAlign = 'right'; ctx.fillText('👑 ' + ANIMALS[bestLevel], w - 14, 32); }
+
+  // сетка 4×4
+  const hover = drag ? cellAt(drag.x, drag.y) : -1;
+  for (let i = 0; i < CELLS; i++) {
+    const p = cellPos(i), x = p.x, y = p.y;
+    const pad = cs * .05, s = cs - pad * 2, rr = cs * .16;
+    const lvl = grid[i];
+    ctx.shadowColor = 'rgba(90,20,40,.22)'; ctx.shadowBlur = 8; ctx.shadowOffsetY = 3;
+    ctx.fillStyle = lvl ? TINTS[lvl] : 'rgba(255,248,240,.16)';
+    roundRect(x + pad, y + pad, s, s, rr); ctx.fill();
+    ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
+    if (drag && i === hover && i !== drag.slot && (!lvl || (lvl === drag.level && lvl < MAX_LEVEL))) {
+      ctx.strokeStyle = lvl ? '#ffd54a' : 'rgba(255,255,255,.85)';
+      ctx.lineWidth = 3;
+      roundRect(x + pad + 1.5, y + pad + 1.5, s - 3, s - 3, rr); ctx.stroke();
+    }
+    if (!lvl) continue;
+    const a = cardAnim[i]; a.pop += dt; a.bounce += dt;
+    let scale = 1, dy = 0;
+    if (a.pop < .38) scale = easeOutBack(Math.min(1, a.pop / .38));
+    if (a.bounce < .3) { const q = a.bounce / .3; dy = -Math.sin(q * Math.PI) * cs * .13; scale *= 1 + Math.sin(q * Math.PI) * .08; }
+    ctx.globalAlpha = (drag && drag.slot === i) ? .3 : 1;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.font = Math.max(8, Math.round(cs * .58 * Math.max(0, scale))) + 'px ' + EMOJI_FONT;
+    ctx.fillText(ANIMALS[lvl], x + cs / 2, y + cs / 2 + cs * .04 + dy);
+    ctx.fillStyle = 'rgba(70,25,45,.55)';
+    ctx.beginPath(); ctx.arc(x + pad + cs * .13, y + pad + cs * .13, cs * .115, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#fff'; ctx.font = '700 ' + Math.round(cs * .14) + 'px sans-serif';
+    ctx.fillText(lvl, x + pad + cs * .13, y + pad + cs * .135);
+    ctx.globalAlpha = 1;
+  }
+
+  // кнопка буста
+  let bLabel, bEnabled = true, bc1 = '#ffa63d', bc2 = '#e07f14';
+  if (now < boostUntil) { bLabel = '⚡ x2 · ' + fmtTime(boostUntil - now); bc1 = '#ffd54a'; bc2 = '#e0a816'; }
+  else if (now < boostReadyAt) { bLabel = '⚡ ' + fmtTime(boostReadyAt - now); bEnabled = false; }
+  else { bLabel = '🎬 ⚡ ' + T.boost; }
+  drawButton(layout.boostBtn, bc1, bc2, bLabel, bEnabled);
+
+  // кнопка покупки
+  const spawnLvl = spawnLevelFor(bestLevel);
+  const cost = buyCost(spawnLvl, buyCount);
+  const hasSpace = firstEmpty(grid) >= 0;
+  drawButton(layout.buyBtn, '#4cd964', '#2fae4a',
+    hasSpace ? ANIMALS[spawnLvl] + ' ' + T.buy + ' · ' + formatNum(cost) + ' 🪙' : T.noSpace,
+    hasSpace && coins >= cost);
+
+  // частицы
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i]; p.t += dt;
+    if (p.t >= p.life) { particles.splice(i, 1); continue; }
+    const q = p.t / p.life;
+    if (p.ring) {
+      ctx.globalAlpha = 1 - q;
+      ctx.strokeStyle = '#ffd54a'; ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.arc(p.x, p.y, cs * (.2 + q * .55), 0, Math.PI * 2); ctx.stroke();
+    } else {
+      p.x += p.vx * dt; p.y += p.vy * dt; p.vy += 500 * dt;
+      ctx.globalAlpha = 1 - q;
+      ctx.fillStyle = p.color;
+      ctx.beginPath(); ctx.arc(p.x, p.y, p.s / 2, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  // всплывающие «+N 🪙»
+  for (let i = floats.length - 1; i >= 0; i--) {
+    const f = floats[i]; f.t += dt;
+    if (f.t >= 1.1) { floats.splice(i, 1); continue; }
+    ctx.globalAlpha = Math.min(1, 2 - f.t * 1.8);
+    ctx.fillStyle = f.color; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.font = '800 ' + f.size + 'px ' + EMOJI_FONT;
+    ctx.fillText(f.text, f.x, f.y - f.t * 46);
+    ctx.globalAlpha = 1;
+  }
+
+  // перетаскиваемый зверёк — поверх всего
+  if (drag) {
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.font = Math.round(cs * .7) + 'px ' + EMOJI_FONT;
+    ctx.globalAlpha = .95;
+    ctx.fillText(ANIMALS[drag.level], drag.x, drag.y - 34);
+    ctx.globalAlpha = 1;
+  }
+
+  // сохранение: троттлинг 3 с + периодический автосейв
+  if (saveDirty && now - lastSaveAt > 3000) doSave();
+  else if (now - lastSaveAt > 12000) doSave();
+
+  requestAnimationFrame(frame);
+}
+
+/* ===== Ввод ===== */
+canvas.addEventListener('pointerdown', e => {
+  if (!inputEnabled) return;
+  Sound.unlock();
+  if (modalOpen) return;
+  const x = e.clientX, y = e.clientY;
+  if (inRect(x, y, layout.buyBtn)) { tryBuy(); return; }
+  if (inRect(x, y, layout.boostBtn)) { tryBoost(); return; }
+  const i = cellAt(x, y);
+  if (i >= 0 && grid[i]) {
+    press = { slot: i, x, y };
+    try { canvas.setPointerCapture(e.pointerId); } catch (err) {}
+  }
+});
+canvas.addEventListener('pointermove', e => {
+  if (!press) return;
+  const x = e.clientX, y = e.clientY;
+  if (!drag && Math.hypot(x - press.x, y - press.y) > 12) drag = { slot: press.slot, level: grid[press.slot], x, y };
+  if (drag) { drag.x = x; drag.y = y; }
+});
+canvas.addEventListener('pointerup', e => {
+  if (drag) {
+    const target = cellAt(e.clientX, e.clientY);
+    if (target >= 0 && target !== drag.slot) handleDrop(drag.slot, target);
+  } else if (press) {
+    tapAnimal(press.slot);
+  }
+  press = null; drag = null;
+});
+canvas.addEventListener('pointercancel', () => { press = null; drag = null; });
+document.addEventListener('contextmenu', e => e.preventDefault());
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) { YSDK.gameplayStop(); doSave(); }
+  else if (!modalOpen) YSDK.gameplayStart();
+});
+window.addEventListener('pagehide', () => doSave());
+
+/* ===== Запуск ===== */
+(async function main() {
+  resize();
+  setLang(navigator.language || 'ru'); // предварительный язык — до ответа SDK
+  await YSDK.init();
+  setLang(YSDK.lang);                  // окончательный — из окружения платформы
+
+  let off = 0;
+  const s = readSave(await YSDK.loadData());
+  if (s) {
+    coins = s.coins; grid = s.grid; bestLevel = s.bestLevel; buyCount = s.buyCount;
+    const elapsed = s.ts ? Date.now() - s.ts : 0;
+    if (elapsed > 60000) off = offlineEarnings(elapsed, totalIncome(grid));
+  } else {
+    grid[5] = 1; grid[6] = 1; // стартовая пара мышат — сразу можно мерджить
+    coins = 15;
+    markDirty();
+  }
+  displayCoins = coins;
+
+  // п. 1.19: сигнал готовности — сразу после загрузки, ДО старта геймплея и модалок
+  // п.1.19: ready() уходит после первой отрисовки. Фолбэк по таймеру — на скрытой вкладке
+  // requestAnimationFrame не тикает вообще, и без него игра осталась бы без ready() и с закрытым вводом.
+  let bootDone = false;
+  const finishBoot = () => {
+    if (bootDone) return; bootDone = true;
+    YSDK.gameReady();
+    inputEnabled = true; // REQ-1.19: до ready() игра клики не принимает
+    if (off > 0) showOffline(off);
+    else YSDK.gameplayStart();
+  };
+  requestAnimationFrame(t => { lastT = t; frame(t); finishBoot(); });
+  setTimeout(finishBoot, 1200);
+})();
+</script>
+</body>
+</html>

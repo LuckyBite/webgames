@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Таверна — стенд раскладки</title>
+<style>
+  body { margin: 16px; background: #1a120d; color: #efe2c4; font: 14px/1.5 system-ui, sans-serif; }
+  .vp { display: inline-block; vertical-align: top; margin: 0 24px 24px 0; }
+  .vp canvas { background: #2a1a12; margin-right: 8px; }
+  table { border-collapse: collapse; margin-bottom: 20px; }
+  td, th { padding: 4px 10px; border-bottom: 1px solid #4a3424; text-align: left; }
+  .bad { color: #ff7a6a; } .ok { color: #8fd07a; }
+</style>
+</head>
+<body>
+<h1>Стенд раскладки</h1>
+<p>Цели для пальца по видам, базовая и полная таверна (5 мест, 3 слота очага, котёл, 8 ящиков). Пороги — цель ≥ 44 px, геймплей ≥ 70%; те же проверки, что в tests/layout.test.mjs.</p>
+<table id="t"><tr><th>экран</th><th>таверна</th><th>режим</th><th>геймплей</th><th>мин. цель</th><th>мелкие</th><th>наложения</th></tr></table>
+<div id="out"></div>
+<script type="module">
+import { computeLayout, checkLayout, targets } from './layout.js';
+import { PANTRY, RARE } from './data.js';
+const VIEWPORTS = [[375, 812], [812, 375], [1280, 720], [768, 1024]];
+const CONFIGS = [['базовая', {}], ['полная', { seats: 5, hearthSlots: 3, cauldronSlots: 1, pantry: [...PANTRY, ...RARE] }],
+  ['с командой', { seats: 5, hearthSlots: 3, cauldronSlots: 2, pantry: [...PANTRY, ...RARE], staff: 4 }]];
+const COLORS = { tab: '#8a8a8a', seat: '#d85a30', face: '#1d9e75', pantry: '#ba7517', cooker: '#e24b4a', barrel: '#7f77dd',
+  bucket: '#5f5e5a', board: '#534ab7', route: '#3f8f3a', seeker: '#d4537e', shop: '#378add', open: '#ef9f27', skip: '#c9763a', menu: '#9a9a9a' };
+const table = document.getElementById('t'), out = document.getElementById('out');
+for (const [name, cfg] of CONFIGS) for (const [w, h] of VIEWPORTS) {
+  const L = computeLayout(w, h, cfg), c = checkLayout(L);
+  const tr = table.insertRow();
+  [`${w}×${h}`, name, c.mode, `${Math.round(c.gameplay * 100)}%`, `${Math.round(c.minTarget)} px`,
+   c.small.join(', ') || '—', c.overlaps.join(', ') || '—'].forEach((v, k) => {
+    const td = tr.insertCell(); td.textContent = v;
+    if (k >= 5) td.className = v === '—' ? 'ok' : 'bad';
+  });
+  const box = document.createElement('div');
+  box.className = 'vp';
+  box.innerHTML = `<div>${w}×${h} · ${name} · ${c.mode}</div>`;
+  const groups = (L.mode === 'split' ? [['hall', 'kitchen']] : [['hall'], ['kitchen']]).concat([['morning'], ['scene']]);
+  const k = Math.min(1, 260 / Math.max(w, h));
+  for (const group of groups) {
+    const cv = document.createElement('canvas');
+    cv.width = w * k; cv.height = h * k;
+    const g = cv.getContext('2d');
+    g.scale(k, k);
+    g.fillStyle = '#3a2519'; g.fillRect(0, 0, w, L.hud.h);
+    for (const t of targets(L)) {
+      const visible = t.screen === 'any' || (t.screen === 'hud' ? group.includes('hall') || group.includes('kitchen') : group.includes(t.screen));
+      if (!visible) continue;
+      g.fillStyle = COLORS[t.kind] + 'aa'; g.fillRect(t.r.x, t.r.y, t.r.w, t.r.h);
+      g.strokeStyle = '#000'; g.strokeRect(t.r.x, t.r.y, t.r.w, t.r.h);
+    }
+    g.strokeStyle = '#efe2c4';
+    if (group.includes('kitchen')) for (const r of [L.kitchen.hatch, L.kitchen.rail, L.kitchen.plate]) g.strokeRect(r.x, r.y, r.w, r.h);
+    if (group.includes('hall')) { const r = L.hall.counter; g.strokeRect(r.x, r.y, r.w, r.h); }
+    if (group.includes('morning')) for (const r of [L.morning.map, L.morning.crew, L.morning.shop, L.morning.staff].filter(Boolean)) g.strokeRect(r.x, r.y, r.w, r.h);
+    if (group.includes('scene')) for (const r of [L.scene.portrait, L.scene.box]) g.strokeRect(r.x, r.y, r.w, r.h);
+    box.appendChild(cv);
+  }
+  out.appendChild(box);
+}
+</script>
+</body>
+</html>

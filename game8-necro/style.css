@@ -1,0 +1,598 @@
+/* Интерфейс «Каменная плита» (v3.4, выбран пользователем из трёх направлений на
+   примерке pics/_ui-real.html). Тёмный камень с фаской, бронза в заголовках, кнопки
+   как вставленные плиты, иконки DCSS того же набора, что персонажи.
+
+   Интерфейс живёт в DOM, а не в канвасе. Раскладки под экраны — в конце файла и
+   этой правкой не тронуты: правило 70% геймплея держится ими, а не стилем. */
+
+@font-face {
+  font-family: 'Pixelify Sans'; font-weight: 400 700; font-display: swap;
+  src: url(vendor/fonts/pixelify-cyrillic.woff2) format('woff2');
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+@font-face {
+  font-family: 'Pixelify Sans'; font-weight: 400 700; font-display: swap;
+  src: url(vendor/fonts/pixelify-latin.woff2) format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+2000-206F, U+20AC, U+2122, U+2212;
+}
+
+:root {
+  --bone: #e6dcc0;
+  --bone-dim: #a89878;
+  --ink: #0a0810;
+  --panel: rgba(10, 8, 16, 0.86);
+  --edge: #3a2e2b;
+  --edge-hot: #6a4a90;
+  --blood: #a8262a;
+  --necro: #8dffb0;
+  --stone2: #3a2e2b;
+  /* Камень плиты: верх светлее низа — свет сверху, как в сцене */
+  --slab-hi: #2a2420;
+  --slab-lo: #14100f;
+  --bevel-hi: #52413c;
+  --bevel-lo: #14100f;
+  --socket: #14100f;
+  --bronze: #c8a35a;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+html, body { height: 100%; overflow: hidden; background: var(--ink); }
+body {
+  user-select: none; -webkit-user-select: none;
+  font-family: 'Pixelify Sans', Georgia, serif;
+  color: var(--bone);
+}
+button { font-family: inherit; }
+.ico { image-rendering: pixelated; display: block; pointer-events: none; }
+/* Прокрутка в тон камню: белая системная полоса в гримуаре и листе ритуала резала плиту */
+* { scrollbar-width: thin; scrollbar-color: var(--bevel-hi) var(--socket); }
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: var(--socket); }
+::-webkit-scrollbar-thumb { background: var(--bevel-hi); border: 1px solid #000; }
+
+#scene {
+  position: fixed; inset: 0; display: block;
+  image-rendering: pixelated; image-rendering: crisp-edges;
+}
+
+#ui {
+  position: fixed; inset: 0;
+  display: flex; flex-direction: column;
+  pointer-events: none;
+}
+#ui > * { pointer-events: auto; }
+
+/* Плита: общий вид всех панелей. Фаска парой «светлый сверху-слева, тёмный снизу-
+   справа» плюс чёрный шов вокруг — без шва плиты сливались с тёмным кадром. */
+.slab, #hud, .block, .banner, .hint, .picker-inner {
+  background: linear-gradient(180deg, var(--slab-hi), var(--slab-lo));
+  border: 2px solid #000;
+  box-shadow: inset 1px 1px 0 var(--bevel-hi), inset -1px -1px 0 var(--bevel-lo), 0 2px 0 rgba(0, 0, 0, 0.7);
+}
+/* Гнездо: вдавленная ячейка внутри плиты — слоты армии, круга, кучки, заклинания */
+.socket, .slot, .cslot, .stock-col, .pick-item, .grim-item {
+  background: var(--socket);
+  border: 1px solid #000;
+  box-shadow: inset 2px 2px 0 #000, inset -1px -1px 0 var(--edge);
+}
+
+/* ═══════════════ Верхняя полоса ═══════════════ */
+#hud {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 8px; padding: 4px 9px;
+  padding-top: max(4px, env(safe-area-inset-top));
+  border-width: 0 0 2px;
+  font-size: 14px; letter-spacing: 0.02em;
+  flex: 0 0 auto;
+}
+.hud-stats { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.portrait.mini { width: clamp(26px, 8vw, 40px); padding: 2px; }
+.hud-left { display: flex; gap: 8px; white-space: nowrap; align-items: center; }
+.hud-left .tier { color: var(--bone-dim); }
+.hud-left b { color: var(--bone); font-weight: 700; }
+.hud-right { display: flex; gap: 10px; align-items: center; }
+/* Полоса рейда: пройденное горит зелёным, текущее пульсирует, чемпион и точка
+   возврата отмечены формой — цветом их было бы не отличить в тёмном HUD */
+.raid-track { display: flex; gap: 4px; align-items: center; }
+.raid-track i {
+  width: 7px; height: 7px; display: inline-block;
+  border: 1px solid var(--bevel-hi); background: var(--socket);
+  transform: rotate(45deg);
+}
+.raid-track i.mid { width: 8px; height: 8px; border-color: var(--bronze); }
+.raid-track i.champ { width: 10px; height: 10px; border-color: var(--blood); }
+.raid-track i.done { background: #3f8f5c; border-color: #3f8f5c; }
+.raid-track i.now { background: var(--bone); border-color: var(--bone); animation: track-now 1s ease-in-out infinite; }
+@keyframes track-now { 0%, 100% { opacity: 0.55; } 50% { opacity: 1; } }
+
+.essence { color: #bf8fff; font-size: 14px; white-space: nowrap; }
+.essence b { color: #bf8fff; }
+.hud-btn {
+  font-size: 12px; color: var(--bone);
+  background: linear-gradient(180deg, var(--bevel-hi), var(--slab-hi));
+  border: 1px solid #000; box-shadow: inset 1px 1px 0 #6b564e;
+  padding: 4px 9px; cursor: pointer; white-space: nowrap;
+}
+.hud-btn.off { color: var(--blood); }
+.remains-hud { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+.rem-chip { display: flex; align-items: center; gap: 1px; font-size: 14px; }
+.rem-chip .ico { width: 22px; height: 22px; }
+.rem-chip b { color: var(--bone); font-weight: 400; }
+
+/* ═══════════════ Баннер результата ═══════════════ */
+.banner {
+  position: absolute; left: 50%; top: 22%;
+  transform: translateX(-50%);
+  padding: 9px 22px;
+  font-size: 19px; text-align: center; white-space: nowrap;
+  text-shadow: 0 1px 0 #000;
+  /* Баннер въезжает, а не возникает: мгновенная подмена текста в одном и том же
+     прямоугольнике читается как баг, особенно когда в очереди несколько сообщений */
+  animation: banner-in 180ms ease-out;
+}
+@keyframes banner-in {
+  from { opacity: 0; transform: translateX(-50%) translateY(-6px); }
+  to { opacity: 1; transform: translateX(-50%) translateY(0); }
+}
+.banner.loss { color: #ffb454; box-shadow: inset 1px 1px 0 var(--bevel-hi), inset 0 0 0 1px var(--blood), 0 0 18px rgba(168, 38, 42, 0.5); }
+.banner.win { color: var(--necro); box-shadow: inset 1px 1px 0 var(--bevel-hi), inset 0 0 0 1px #3f8f5c, 0 0 18px rgba(63, 143, 92, 0.5); }
+.hidden { display: none !important; }
+
+/* ═══════════════ Экран загрузки ═══════════════ */
+#loading {
+  position: fixed; inset: 0; z-index: 10;
+  background: var(--ink);
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px;
+}
+.load-title { font-size: 26px; color: var(--bronze); letter-spacing: 0.06em; text-shadow: 0 2px 0 #000; }
+.load-sub { font-size: 14px; color: var(--necro); animation: load-breathe 1.6s ease-in-out infinite; }
+@keyframes load-breathe { 0%, 100% { opacity: 0.45; } 50% { opacity: 1; } }
+
+/* ═══════════════ Рекламное предложение ═══════════════ */
+.offer {
+  position: absolute; left: 50%; top: 44%;
+  transform: translateX(-50%);
+  max-width: min(420px, 86vw);
+  padding: 10px 18px;
+  font-size: 16px; color: #e6dcc0;
+  background: linear-gradient(#3f8f5c, #1e3a2a);
+  border: 2px solid #000;
+  box-shadow: inset 1px 1px 0 #a8c85a, 0 0 16px rgba(63, 143, 92, 0.6);
+  cursor: pointer;
+}
+.offer:active { transform: translateX(-50%) translateY(1px); }
+.mini-btn.ad { color: var(--necro); box-shadow: inset 1px 1px 0 #6b564e, inset 0 0 0 1px #3f8f5c; }
+
+/* ═══════════════ Подсказка туториала ═══════════════ */
+.hint {
+  position: absolute; left: 50%; top: 34%;
+  transform: translateX(-50%);
+  max-width: min(420px, 86vw);
+  padding: 8px 14px;
+  color: var(--bone);
+  font-size: 14px; text-align: center;
+  box-shadow: inset 1px 1px 0 var(--bevel-hi), inset 0 0 0 1px #3f8f5c, 0 0 18px rgba(0, 0, 0, 0.8);
+  pointer-events: none;
+}
+/* Пульс на цели подсказки — рамкой, чтобы не трогать раскладку */
+.tut-pulse { animation: tut-pulse 1.1s ease-in-out infinite; }
+@keyframes tut-pulse {
+  0%, 100% { outline: 2px solid rgba(141, 255, 176, 0); }
+  50% { outline: 2px solid rgba(141, 255, 176, 0.7); }
+}
+
+/* ═══════════════ Нижняя панель ═══════════════ */
+#panel {
+  margin-top: auto;
+  display: grid; gap: 6px; padding: 6px;
+  padding-bottom: max(6px, env(safe-area-inset-bottom));
+  grid-template-columns: 1fr;
+}
+.block { position: relative; padding: 7px 8px 8px; }
+.block h2 {
+  font-size: 12px; font-weight: 600; text-transform: uppercase;
+  letter-spacing: 0.1em; color: var(--bronze); margin-bottom: 6px;
+  text-shadow: 0 1px 0 #000;
+}
+
+.caster-links { display: flex; gap: 6px; margin-top: 7px; }
+.caster-links .mini-btn { flex: 1 1 0; }
+
+/* Кнопка-плита: выпуклая, в отличие от вдавленных гнёзд */
+.mini-btn {
+  font-size: 12px; color: var(--bone);
+  background: linear-gradient(180deg, var(--bevel-hi), var(--slab-hi));
+  border: 1px solid #000; box-shadow: inset 1px 1px 0 #6b564e;
+  padding: 5px 8px; cursor: pointer; white-space: nowrap;
+  display: inline-flex; align-items: center; justify-content: center; gap: 5px;
+  text-shadow: 0 1px 0 #000;
+}
+.mini-btn .ico { width: 20px; height: 20px; margin: -3px 0; }
+.mini-btn:not(:disabled):active { background: var(--slab-lo); box-shadow: inset 1px 1px 0 #000; transform: translateY(1px); }
+.mini-btn:disabled { opacity: 0.4; cursor: default; }
+.mini-btn.lich { color: #bf8fff; }
+
+.portrait {
+  flex: 0 0 auto; width: 76px; align-self: flex-start;
+  padding: 3px; background: var(--socket);
+  border: 1px solid #000;
+  box-shadow: inset 0 0 10px rgba(63, 143, 92, 0.35), inset 1px 1px 0 #000, 0 0 0 1px var(--bevel-hi);
+  transition: box-shadow 120ms linear;
+}
+.portrait canvas { display: block; width: 100%; image-rendering: pixelated; }
+/* Лицо в шапке крупнее прежнего бюста: это окошко-собеседник, а не значок */
+.portrait.mini { width: clamp(30px, 9vw, 46px); }
+/* Рамка по лучшему ярусу за всю игру: камень → бронза → серебро → зелёное пламя */
+.portrait.rank-1 { box-shadow: inset 0 0 10px rgba(63, 143, 92, 0.35), 0 0 0 1px var(--bronze); }
+.portrait.rank-2 { box-shadow: inset 0 0 10px rgba(63, 143, 92, 0.35), 0 0 0 1px #9fb2c4, 0 0 0 2px #000; }
+.portrait.rank-3 { box-shadow: inset 0 0 12px rgba(141, 255, 176, 0.5), 0 0 0 1px var(--necro), 0 0 8px rgba(141, 255, 176, 0.6); animation: rank-flame 1.6s ease-in-out infinite; }
+@keyframes rank-flame { 50% { box-shadow: inset 0 0 16px rgba(141, 255, 176, 0.7), 0 0 0 1px var(--necro), 0 0 14px rgba(141, 255, 176, 0.8); } }
+/* Реакции: хохот подпрыгивает с зелёной вспышкой, плач дрожит в красном */
+.portrait.react-laugh { animation: face-laugh 0.45s ease-out 3; background: #1e3a2a; }
+@keyframes face-laugh { 0%, 100% { transform: translateY(0); } 40% { transform: translateY(-3px) scale(1.06); } }
+.portrait.react-weep { animation: face-weep 0.12s linear 8; background: #2a0a0d; }
+@keyframes face-weep { 0%, 100% { transform: translateX(0); } 50% { transform: translateX(-1px); } }
+
+/* Каст — вспышка в раме, а не в кадре */
+.portrait.casting { box-shadow: inset 0 0 22px rgba(141, 255, 176, 0.85), 0 0 12px rgba(141, 255, 176, 0.5); }
+
+/* Армия */
+.army { display: flex; gap: 6px; }
+.slot {
+  flex: 1 1 0; min-width: 0; aspect-ratio: 3 / 4;
+  display: flex; flex-direction: column; align-items: center; justify-content: flex-end;
+  position: relative; cursor: pointer; overflow: hidden;
+}
+.slot.empty::after { content: '+'; color: var(--bevel-hi); font-size: 22px; margin-bottom: 30%; }
+.slot canvas { width: 86%; image-rendering: pixelated; margin-bottom: auto; margin-top: 2%; }
+.slot .stars { position: absolute; right: 3px; top: 2px; font-size: 10px; color: var(--bronze); line-height: 1; text-shadow: 0 1px 0 #000; }
+/* Школа — полоской сверху слота: состав армии по школам одним взглядом */
+.slot-school { position: absolute; left: 0; top: 0; width: 100%; height: 2px; }
+.slot-tier { position: absolute; left: 3px; top: 3px; font-size: 9px; letter-spacing: -1px; color: var(--bone-dim); line-height: 1; }
+.slot .hpline { position: absolute; left: 3px; bottom: 3px; height: 4px; background: #74d05a; max-width: calc(100% - 6px); box-shadow: 0 0 0 1px #000; }
+
+.sheet-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.sheet-head small { font-size: 10px; color: var(--bone-dim); }
+
+/* Казарма: все поднятые плитками. В строю — зелёная рамка, выбранный кандидат на
+   замену — бронзовая, и тогда пульсируют те, кого он может заменить. */
+.barracks-block { margin-top: 9px; }
+.barracks-block.flash { animation: barracks-flash 0.9s ease-out; }
+@keyframes barracks-flash { 0% { box-shadow: 0 0 0 2px var(--necro); } 100% { box-shadow: 0 0 0 2px transparent; } }
+.barracks { display: grid; grid-template-columns: repeat(auto-fill, minmax(44px, 1fr)); gap: 4px; }
+.bunit {
+  position: relative; aspect-ratio: 1 / 1; cursor: pointer;
+  background: var(--socket); border: 1px solid #000;
+  box-shadow: inset 2px 2px 0 #000, inset -1px -1px 0 var(--edge);
+  display: flex; align-items: flex-end; justify-content: center; overflow: hidden;
+}
+.bunit::before { content: ''; position: absolute; left: 0; top: 0; right: 0; height: 2px; background: var(--school); opacity: 0.8; }
+.bunit canvas { width: 92%; image-rendering: pixelated; }
+.bunit i { position: absolute; right: 2px; top: 2px; font-style: normal; font-size: 8px; color: var(--bronze); line-height: 1; text-shadow: 0 1px 0 #000; }
+.bunit.in { box-shadow: inset 0 0 0 1px #3f8f5c, inset 0 0 10px #1e3a2a; }
+.bunit:not(.in) canvas { opacity: 0.7; }
+.bunit.pick { box-shadow: inset 0 0 0 2px var(--bronze), 0 0 8px rgba(200, 163, 90, 0.5); }
+.bunit.pick canvas { opacity: 1; }
+.swap-target { animation: swap-pulse 0.9s ease-in-out infinite; }
+@keyframes swap-pulse { 0%, 100% { outline: 2px solid rgba(200, 163, 90, 0); } 50% { outline: 2px solid rgba(200, 163, 90, 0.85); } }
+.sheet-only { display: none; }            /* в альбоме лист не выдвигается — закрывать нечего */
+
+/* Ритуальный круг: три гнезда, в каждом видно, что положено */
+.circle { display: flex; gap: 8px; justify-content: center; margin-bottom: 7px; }
+.ritual-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 7px; }
+/* Рекламное предложение — своей строкой: в ряду с двумя кнопками оно обрезалось */
+.ritual-actions .mini-btn.ad { flex: 1 0 100%; white-space: normal; }
+.ritual-actions .mini-btn { flex: 1 1 0; }
+.cslot {
+  width: 46px; height: 46px; flex: 0 0 auto;
+  display: flex; align-items: center; justify-content: center; position: relative;
+  cursor: pointer;
+}
+.cslot .ico { width: 36px; height: 36px; }
+.cslot.filled { box-shadow: inset 2px 2px 0 #000, inset 0 0 0 1px var(--glow, var(--edge)), 0 0 8px color-mix(in srgb, var(--glow, #000) 45%, transparent); }
+.cslot .dmark { position: absolute; right: 2px; bottom: 0; font-style: normal; font-size: 11px; color: var(--bone); text-shadow: 0 1px 0 #000; }
+
+/* Главная кнопка: зелёная плита — твой цвет, это и есть «поднять» */
+.raise {
+  width: 100%; padding: 9px;
+  font-size: 16px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase;
+  color: #e6dcc0;
+  background: linear-gradient(#3f8f5c, #1e3a2a);
+  border: 2px solid #000;
+  box-shadow: inset 1px 1px 0 #a8c85a, 0 0 10px rgba(30, 58, 42, 0.9);
+  text-shadow: 0 1px 0 #000;
+  cursor: pointer;
+}
+.raise:disabled { filter: grayscale(0.8) brightness(0.6); cursor: default; box-shadow: inset 1px 1px 0 #52413c; }
+.raise:not(:disabled):active { background: #1e3a2a; box-shadow: inset 1px 1px 0 #000; transform: translateY(1px); }
+
+/* Запас останков: четыре кучки, в каждой иконка школы и три плотности */
+/* minmax(0, 1fr): иначе колонка не уже своего содержимого, и кучки вылезали из колонки */
+.stock { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 4px; margin-top: 8px; }
+.stock-col { display: flex; flex-direction: column; align-items: stretch; gap: 2px; padding: 3px 2px; }
+.stock-col .ico.pile { width: 32px; height: 32px; margin: 0 auto; }
+.stock-col > span { font-size: 10px; text-align: center; color: var(--bone-dim); }
+.dchip {
+  font-size: 12px; padding: 2px 0; text-align: center;
+  background: linear-gradient(180deg, var(--bevel-hi), var(--slab-hi));
+  border: 1px solid #000; box-shadow: inset 1px 1px 0 #6b564e;
+  cursor: pointer;
+}
+.dchip.zero { opacity: 0.3; cursor: default; background: transparent; box-shadow: none; }
+.dchip:not(.zero):active { background: var(--slab-lo); }
+
+/* Заклинания */
+.spells { display: flex; gap: 6px; }
+.spell {
+  flex: 1 1 0; padding: 6px 3px 7px;
+  color: var(--bone);
+  background: var(--socket);
+  border: 1px solid #000;
+  box-shadow: inset 2px 2px 0 #000, inset -1px -1px 0 var(--edge);
+  text-shadow: 0 1px 0 #000;
+  cursor: pointer; position: relative; overflow: hidden;
+  display: flex; flex-direction: column; align-items: center;
+}
+.spell:not(:disabled):active { transform: translateY(1px); }
+.spell .ico { width: 40px; height: 40px; margin-bottom: 3px; }
+.spell span { display: block; font-size: 12px; line-height: 1.1; text-align: center; }
+.spell small { display: block; font-size: 10px; color: var(--bone-dim); margin-top: 2px; text-align: center; }
+/* Перезарядка: иконка гаснет, сверху цифра секунд — ждать или нет, видно без счёта */
+.spell:disabled { cursor: default; }
+.spell:disabled .ico { filter: grayscale(1) brightness(0.45); }
+.spell .cdn { position: absolute; top: 12px; left: 0; right: 0; font-size: 20px; font-weight: 700; color: var(--bone); text-shadow: 0 0 3px #000, 0 1px 0 #000; pointer-events: none; }
+/* Неизученное заклинание видно, но глухо: игрок должен знать, что его ждёт впереди */
+.spell.locked { opacity: 0.55; }
+.spell.locked .cdn { font-size: 16px; top: 16px; }
+.spell .cd {
+  position: absolute; left: 0; bottom: 0; height: 3px;
+  background: var(--necro);
+  transition: width 90ms linear;      /* полоса ползёт, а не прыгает раз в кадр */
+}
+/* Заклинание готово — гнездо светится зелёным. Идл-игра обязана сама подсказывать,
+   что у игрока снова есть рука: иначе кулдаун замечают только те, кто его считает. */
+.spell:not(:disabled):not(.locked) { animation: spell-ready 1.8s ease-in-out infinite; }
+@keyframes spell-ready {
+  0%, 100% { box-shadow: inset 0 0 0 1px #3f8f5c, inset 0 0 8px #1e3a2a; }
+  50% { box-shadow: inset 0 0 0 1px var(--necro), inset 0 0 16px #3f8f5c, 0 0 8px rgba(141, 255, 176, 0.4); }
+}
+
+/* ═══════════════ Окна: выбор нежити, гримуар, лич ═══════════════ */
+.picker {
+  position: fixed; inset: 0; z-index: 5;
+  background: rgba(5, 4, 8, 0.8);
+  display: flex; align-items: center; justify-content: center;
+  padding: 16px;
+}
+.picker-inner { width: min(440px, 100%); max-height: 80vh; overflow: auto; padding: 12px; }
+.picker-inner h2 { font-size: 14px; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase; color: var(--bronze); margin-bottom: 10px; text-shadow: 0 1px 0 #000; }
+.picker-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(88px, 1fr)); gap: 6px; margin-bottom: 10px; }
+.pick-item { padding: 6px 4px; text-align: center; cursor: pointer; font-size: 12px; }
+.pick-item canvas { width: 56px; image-rendering: pixelated; display: block; margin: 0 auto 3px; }
+.pick-item .stars { color: var(--bronze); font-size: 10px; }
+.pick-item:active { box-shadow: inset 0 0 0 1px var(--necro); }
+
+.grimoire-list { display: flex; flex-direction: column; gap: 5px; margin-bottom: 10px; max-height: 56vh; overflow: auto; }
+.grim-item { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 7px 9px; }
+.grim-item.maxed { opacity: 0.55; }
+.grim-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.grim-text b { font-size: 14px; font-weight: 600; color: var(--bone); }
+.grim-text small { font-size: 12px; color: var(--bone-dim); }
+.grim-buy {
+  flex: 0 0 auto; font-size: 13px; color: #e6dcc0;
+  background: linear-gradient(#3f8f5c, #1e3a2a);
+  border: 1px solid #000; box-shadow: inset 1px 1px 0 #a8c85a;
+  padding: 6px 10px; cursor: pointer; white-space: nowrap; text-shadow: 0 1px 0 #000;
+}
+.grim-buy:disabled { filter: grayscale(1) brightness(0.6); cursor: default; }
+.grim-buy:not(:disabled):active { transform: translateY(1px); }
+
+/* Склеп: вкладки и карточки вещей. Закрытая вещь показывает обе двери — рекламу и
+   достижение; надетая подсвечена зелёным. */
+.crypt-inner { width: min(560px, 100%); }
+.crypt-tabs { display: flex; gap: 4px; margin-bottom: 8px; }
+.crypt-tabs .mini-btn { flex: 1 1 0; }
+.crypt-tabs .mini-btn.on { color: var(--bronze); background: var(--slab-lo); box-shadow: inset 1px 1px 0 #000, inset 0 -2px 0 var(--bronze); }
+.crypt-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(118px, 1fr)); gap: 6px; margin-bottom: 10px; max-height: 58vh; overflow: auto; }
+.crypt-note { grid-column: 1 / -1; font-size: 12px; color: var(--bone-dim); }
+.crypt-item {
+  display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 6px 4px;
+  background: var(--socket); border: 1px solid #000; box-shadow: inset 2px 2px 0 #000, inset -1px -1px 0 var(--edge);
+  text-align: center;
+}
+.crypt-item canvas { image-rendering: pixelated; width: 72px; height: auto; }
+.crypt-item b { font-size: 12px; font-weight: 600; }
+.crypt-item small { font-size: 10px; color: var(--bone-dim); line-height: 1.2; }
+.crypt-item .mini-btn { width: 100%; }
+.crypt-item.on { box-shadow: inset 0 0 0 1px #3f8f5c, inset 0 0 12px #1e3a2a; }
+.crypt-item.locked canvas { filter: grayscale(0.7) brightness(0.6); }
+
+/* Вступление: картинки сверху, заголовок, две-три строки текста, точки шагов */
+.intro-inner { width: min(400px, 100%); text-align: center; }
+.intro-art { display: flex; justify-content: center; align-items: flex-end; gap: 6px; margin: 4px 0 10px; min-height: 72px; }
+.intro-art canvas, .intro-art .ico { width: 64px; height: 64px; image-rendering: pixelated; }
+.intro-art .intro-face { background: var(--socket); box-shadow: inset 2px 2px 0 #000, 0 0 0 1px var(--bronze); padding: 2px; }
+.intro-inner h2 { text-align: center; font-size: 16px; }
+.intro-text { font-size: 15px; line-height: 1.45; margin-bottom: 12px; }
+.intro-dots { display: flex; justify-content: center; gap: 6px; margin-bottom: 12px; }
+.intro-dots i { width: 8px; height: 8px; transform: rotate(45deg); background: var(--socket); border: 1px solid var(--bevel-hi); }
+.intro-dots i.on { background: var(--necro); border-color: var(--necro); }
+.intro-actions { display: flex; gap: 8px; align-items: stretch; }
+.intro-actions .raise { flex: 1 1 auto; }
+.intro-actions .mini-btn { flex: 0 0 auto; }
+
+/* Справочник */
+.help-btn { font-weight: 700; min-width: 26px; }
+.help-inner { width: min(520px, 100%); }
+.help-body { max-height: 64vh; overflow: auto; margin-bottom: 10px; display: flex; flex-direction: column; gap: 10px; }
+.help-sec h3 { font-size: 13px; color: var(--bronze); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 4px; font-weight: 600; }
+.help-sec p { font-size: 14px; line-height: 1.45; }
+.help-icons { display: flex; gap: 4px; margin-bottom: 4px; }
+.help-icons .ico { width: 28px; height: 28px; }
+.help-row { display: flex; gap: 8px; align-items: center; padding: 3px 0; border-top: 1px solid var(--edge); }
+.help-row .ico, .help-row .ico-blank { width: 28px; height: 28px; flex: 0 0 auto; }
+.help-row b { display: block; font-size: 13px; font-weight: 600; }
+.help-row small { display: block; font-size: 12px; color: var(--bone-dim); line-height: 1.3; }
+
+/* Выбор карточки: три плиты в ряд, школа — цветной полосой сверху и иконкой */
+.cards-inner { width: min(560px, 100%); }
+.cards-inner h2 { text-align: center; }
+.cards-list { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-bottom: 8px; }
+.card {
+  display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 8px 6px 10px;
+  background: linear-gradient(180deg, var(--slab-hi), var(--slab-lo));
+  border: 1px solid #000; box-shadow: inset 0 2px 0 var(--school, var(--bronze)), inset 1px 1px 0 var(--bevel-hi);
+  color: var(--bone); cursor: pointer; text-align: center; font-family: inherit;
+}
+.card:active { transform: translateY(1px); }
+.card-head { display: flex; align-items: center; gap: 4px; align-self: stretch; justify-content: center; }
+.card-head small { font-size: 10px; color: var(--bone-dim); text-transform: uppercase; letter-spacing: 0.06em; }
+.card .card-school { width: 18px; height: 18px; }
+.card .card-ico { width: 48px; height: 48px; }
+.card b { font-size: 13px; font-weight: 600; }
+.card .card-rank { font-style: normal; font-size: 10px; color: var(--bronze); }
+.card p { font-size: 12px; line-height: 1.3; color: var(--bone-dim); }
+.card-replace .card-ico { width: 40px; height: 40px; }
+@media (max-width: 420px) {
+  .cards-list { grid-template-columns: 1fr; }
+  .card { flex-direction: row; flex-wrap: wrap; text-align: left; justify-content: flex-start; }
+  .card-head { order: 0; align-self: auto; }
+  .card p { flex-basis: 100%; }
+}
+.lich-text { font-size: 15px; line-height: 1.45; color: var(--bone); margin-bottom: 12px; }
+.lich-text b { color: #bf8fff; }
+.lich-actions { display: flex; gap: 8px; }
+.raise.ghost { background: linear-gradient(180deg, var(--bevel-hi), var(--slab-hi)); box-shadow: inset 1px 1px 0 #6b564e; color: var(--bone-dim); text-transform: none; font-weight: 400; letter-spacing: 0.04em; }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   АДАПТИВНЫЕ РАСКЛАДКИ — только в конце файла
+
+   Порядок здесь не косметика: правила ниже перебивают базовые при равной
+   специфичности. Когда портретный блок стоял выше, «display: none» для подсказок
+   заклинаний молча проигрывал базовому «display: block», и кнопка держала 101 px
+   высоты вместо 45 — замер это и вскрыл.
+
+   Мера успеха одна: доля кадра, занятая боем (п. 5.1.1.2 требует ≥70%). До правок
+   портрет давал 27.8% на 390×844 и 4.9% на 360×640.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ── Портрет: бой на весь экран, ритуал в выдвижном листе ── */
+@media (max-aspect-ratio: 1/1) {
+  #ritual-sheet {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 4;
+    max-height: 76vh; overflow-y: auto;
+    border-radius: 10px 10px 0 0;
+    transform: translateY(101%);
+    transition: transform 180ms ease-out;
+    padding-bottom: max(10px, env(safe-area-inset-bottom));
+  }
+  #ritual-sheet.open { transform: translateY(0); }
+  .sheet-only { display: inline-block; }
+
+  /* Нижняя полоса: армия строкой, под ней заклинания и вход в ритуал */
+  #panel { gap: 4px; padding: 4px; padding-bottom: max(4px, env(safe-area-inset-bottom)); }
+  .block { padding: 4px 5px 5px; }
+  .army-block h2 { display: none; }        /* заголовок стоил строки на весь экран */
+  .army { gap: 3px; }
+  /* Слот по высоте, а не по ширине: при трёх юнитах квадрат в треть экрана давал
+     120 px на слот, и панель в v3.4 съела бою 4% (66.5% при пороге 70). */
+  .slot { aspect-ratio: auto; height: clamp(52px, 8.5vh, 76px); }
+  .slot canvas { height: 92%; width: auto; margin-top: 0; }
+  .slot .stars { font-size: 8px; line-height: 1.1; }
+
+  .spell-block { display: flex; gap: 5px; align-items: flex-start; }
+  .spell-block .spells { flex: 1 1 auto; min-width: 0; }
+  .spell-row { display: flex; flex-direction: column; gap: 4px; flex: 0 0 auto; }
+  .spell { padding: 4px 3px; }
+  .spell .ico { width: 28px; height: 28px; margin-bottom: 1px; }
+  /* Шапка в одну строку: останки иконками 16 px и без переноса — перенос давал 62 px */
+  #hud { font-size: 13px; padding-top: max(3px, env(safe-area-inset-top)); padding-bottom: 3px; }
+  .remains-hud { flex-wrap: nowrap; gap: 5px; }
+  .rem-chip { font-size: 13px; }
+  .rem-chip .ico { width: 16px; height: 16px; }
+  .hud-right { gap: 6px; }
+  .hud-btn { padding: 3px 6px; font-size: 11px; }
+  .spell .cdn { top: 6px; font-size: 16px; }
+  .spell span { display: none; }           /* до 4 заклинаний и «Ритуал» в одну строку */
+  .spell small { display: none; }          /* в бою подсказку не читают, а место она берёт */
+}
+
+/* ── Альбом: бой слева на всю высоту, панель узкой колонкой справа ── */
+@media (min-aspect-ratio: 1/1) {
+  /* 210–300 px отбирали до 26% ширины и держали геймплей на 64%. Колонка в 150–230
+     оставляет бою больше 70% и на 812×375, и на 1920×1080. */
+  /* v3.4: 230 → 260 под гнёзда с иконками. На 1280 бою остаётся 80%, на 812×375 — 79% */
+  #ui { display: grid; grid-template-columns: 1fr clamp(170px, 20vw, 260px); grid-template-rows: auto 1fr; }
+  #hud { grid-column: 1 / -1; padding: 3px 8px; font-size: 12px; }
+  #panel {
+    grid-column: 2; grid-row: 2;
+    display: flex; flex-direction: column; justify-content: flex-end;
+    min-height: 0; max-height: 100%; overflow: hidden;
+    /* safe-area снизу в альбоме не нужна — она уводила панель на 13 px за край экрана */
+    gap: 5px; padding: 5px; padding-bottom: 5px;
+    background: linear-gradient(270deg, rgba(10, 8, 16, 0.95), rgba(10, 8, 16, 0.3));
+  }
+  /* Восемь слотов в один ряд при 150 px дают по 17 px — нечитаемо. Две строки по четыре.
+     minmax(0, 1fr), а не 1fr: обычный 1fr равен minmax(auto, 1fr), колонка не может
+     стать уже своего min-content, и сетка вылезала на 345 px из колонки в 218. */
+  .army { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 4px; }
+  .slot { aspect-ratio: 1 / 1; }
+  .slot .stars { font-size: 8px; line-height: 1.1; }
+  .slot canvas { width: 84%; }
+  .spells { flex-wrap: wrap; }
+  .spell { flex: 1 1 40%; }
+  .spell small { display: none; }
+  /* Порядок в колонке: ритуал сверху и он же отдаёт место прокрутке, армия и
+     заклинания прижаты к низу — их видно всегда, потому что они про текущий бой. */
+  #ritual-sheet { order: 0; flex: 0 1 auto; min-height: 0; overflow-y: auto; overflow-x: hidden; }
+  .army-block { order: 1; flex: 0 0 auto; }
+  .spell-block { order: 2; flex: 0 0 auto; }
+  #stock { max-height: 22vh; overflow-y: auto; }
+  #btn-sheet { display: none; }            /* ритуал и так на виду */
+  .banner { top: 24%; left: 34%; }
+  .block { padding: 5px 6px 6px; }
+  .block h2 { margin-bottom: 4px; }
+}
+
+/* ── Совсем низкие экраны: прячем всё, что не нужно в бою ── */
+@media (max-height: 420px) {
+  .portrait.mini { width: 26px; padding: 1px; }   /* лицо живое (v3.5): сжимаем, а не прячем */
+  .raid-track i { width: 5px; height: 5px; }
+  .raid-track i.champ { width: 7px; height: 7px; }
+}
+
+/* ── Низкие экраны (альбом на телефоне): ритуал уходит в лист даже в альбоме ──
+   При высоте 375 колонка физически не вмещает армию, заклинания, круг и кучки:
+   замер дал 0 видимых слотов из 8. Лист решает это, не отбирая у боя ни пикселя. */
+@media (min-aspect-ratio: 1/1) and (max-height: 520px) {
+  #ritual-sheet {
+    position: fixed; left: auto; right: 0; bottom: 0; width: clamp(240px, 46vw, 420px);
+    z-index: 4; max-height: 92vh; overflow-y: auto;
+    order: 0; flex: none;
+    border-radius: 10px 0 0 0;
+    transform: translateY(101%);
+    transition: transform 180ms ease-out;
+  }
+  #ritual-sheet.open { transform: translateY(0); }
+  .sheet-only { display: inline-block; }
+  #btn-sheet { display: inline-block; }
+  #stock { max-height: 40vh; }
+}
+
+/* ── Узкий портрет (≤ 380 px): шапка обязана влезть в одну строку ──
+   С иконками останков она выходила за 360 px. Лицо некроманта с v3.5 живое и
+   реагирует на игру, поэтому его не прячем, а сжимаем: всё остальное — тоже. */
+@media (max-width: 380px) {
+  .portrait.mini { width: 28px; padding: 1px; }
+  .hud-left { gap: 5px; }
+  #hud { padding-left: 5px; padding-right: 5px; gap: 4px; }
+  .remains-hud { gap: 3px; }
+  .rem-chip { font-size: 12px; }
+  .hud-btn { padding: 3px 4px; }
+}
+
+/* ── Баннер в портрете: переносится, а не уезжает за края ──
+   Сообщение о добыче «Партия перебита · Душа ×1, Прах ×2, Кость…» шире 390 px. */
+@media (max-aspect-ratio: 1/1) {
+  .banner { white-space: normal; width: max-content; max-width: 92vw; font-size: 16px; padding: 8px 14px; }
+}

@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Таверна — лаборатория персонажей и еды</title>
+<style>body { margin: 0; background: #120b07; } canvas { display: block; }</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script type="module">
+import { drawGuest, drawHead, makeLook } from './chars.js';
+import { drawItem, drawMug, drawPlate } from './food.js';
+import { drawFire, drawZhar, drawZharPortrait, drawZharBadge } from './fire.js';
+import { RACES, STAFF } from './data.js';
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const W = 960, H = 1310, dpr = Math.min(2, devicePixelRatio || 1);
+cv.width = W * dpr; cv.height = H * dpr; cv.style.width = W + 'px'; cv.style.height = H + 'px';
+const looks = RACES.map((r, i) => [1, 2, 3].map(k => makeLook(r, i * 100 + k)));
+const staff = STAFF.map(s => ({ ...s, look: Object.assign(makeLook(s.race, s.seed), s.look) }));
+function frame(ms) {
+  const t = ms / 1000;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.fillStyle = '#2e1d14'; ctx.fillRect(0, 0, W, H);
+  // ряды — расы, столбцы — настроение: спокоен, ждёт, злится
+  RACES.forEach((race, row) => {
+    const y = 130 + row * 140;
+    [0, 1, 2].forEach(m => drawGuest(ctx, looks[row][m], { m, t }, 80 + m * 140, y, 0.75));
+    ctx.fillStyle = '#6b4423'; ctx.fillRect(10, y, 430, 20);
+  });
+  // головы для окна раздачи
+  looks.flat().forEach((look, k) => {
+    const cx = 500 + (k % 3) * 70, cy = 46 + Math.floor(k / 3) * 70;
+    ctx.save(); ctx.beginPath(); ctx.arc(cx, cy, 30, 0, Math.PI * 2);
+    ctx.fillStyle = '#1a110b'; ctx.fill(); ctx.clip();
+    drawHead(ctx, look, { m: k % 3, t }, cx, cy, 60);
+    ctx.restore();
+  });
+  // продукты, кружка, тарелки
+  ['bread', 'cheese', 'onion', 'meat', 'roast', 'burnt', 'mushroom', 'honey', 'berries', 'pepper', 'broth', 'broth_burnt']
+    .forEach((id, k) => drawItem(ctx, id, 730 + (k % 3) * 75, 50 + Math.floor(k / 3) * 75, 58));
+  const fill = (t % 3) / 2;
+  drawMug(ctx, 540, 450, 80, Math.min(1, fill), fill >= 1 ? 'spilled' : fill > 0.8 ? 'full' : null);
+  drawPlate(ctx, ['bread', 'roast', 'cheese'], 690, 450, 130);
+  drawPlate(ctx, ['roast', 'onion'], 860, 450, 100);
+  // помощники в рост: дети меньше
+  staff.forEach((s, k) => {
+    const x = 90 + k * 220, y = 900;
+    drawGuest(ctx, s.look, { m: 0, t }, x, y, s.kid ? 0.62 : 0.75);
+    ctx.fillStyle = '#efe2c4'; ctx.font = '600 15px system-ui'; ctx.textAlign = 'center';
+    ctx.fillText(`${s.name}, ${s.role}`, x, y + 44);
+    ctx.textAlign = 'left';
+  });
+  ctx.fillStyle = '#6b4423'; ctx.fillRect(10, 900, 940, 18);
+  // огонь и Жар: портрет сцены (говорит по чётным секундам), очаг кухни в масштабе
+  // телефона, значок подсказки, камин зала и котёл
+  const talk = Math.floor(t) % 2 === 0;
+  drawZharPortrait(ctx, { x: 20, y: 1070, w: 220, h: 220 }, t, talk);
+  ctx.fillStyle = '#4a4038'; ctx.fillRect(270, 1130, 160, 160);
+  ctx.fillStyle = '#140b07'; ctx.fillRect(276, 1218, 148, 64);
+  drawFire(ctx, 350, 1284, 128, 67, t, { logs: true });
+  drawZhar(ctx, 350, 1258, 48, t, { talk });
+  drawZharBadge(ctx, 480, 1210, 34, t);
+  drawFire(ctx, 620, 1290, 160, 130, t, { logs: true, seed: 5 });
+  drawFire(ctx, 820, 1290, 70, 36, t + 1.3, { sparks: false, seed: 2 });
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

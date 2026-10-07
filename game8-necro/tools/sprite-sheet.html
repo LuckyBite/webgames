@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<meta charset="utf-8">
+<title>Некро · лист спрайтов</title>
+<!--
+  Приёмка всех спрайтов сразу. art-lab.html смотрит на ОДИН спрайт под лупой —
+  этот лист смотрит на ВСЕ и отвечает на единственный вопрос, который на глаз в
+  сцене не проверяется: отличаются ли фигуры силуэтами.
+
+  Правило, из-за которого лист вообще написан: восемь видов нежити T1/T2 стояли
+  заглушками по одному шаблону, и в сцене это читалось как «одинаковые фигурки
+  разного цвета». В сцене их видно по одной в пятне факела, поэтому сравнить не
+  с чем; здесь они стоят рядом, и подмена видна сразу.
+
+  Столбец «силуэт» — тот же спрайт, залитый чёрным. Если два силуэта похожи,
+  спрайты одинаковые, какого бы цвета они ни были.
+-->
+<style>
+  :root { --ink: #0a0810; --stone: #241d1c; --line: #3a2e2b; --text: #9fb2c4; }
+  body { margin: 0; background: var(--ink); color: var(--text);
+         font: 13px/1.5 ui-monospace, Consolas, monospace; }
+  header { padding: 14px 18px; border-bottom: 1px solid var(--line); }
+  h1 { margin: 0 0 4px; font-size: 15px; color: #e6dcc0; font-weight: 600; }
+  .hint { color: #6a7d94; }
+  .bad { color: #a8262a; }
+  .ok { color: #3f8f5c; }
+  .grid { display: flex; flex-wrap: wrap; gap: 10px; padding: 14px 18px; }
+  .card { border: 1px solid var(--line); background: #14100f; padding: 8px; }
+  .card h2 { margin: 0 0 6px; font-size: 12px; color: #e6dcc0; font-weight: 600; }
+  .row { display: flex; gap: 8px; align-items: flex-end; }
+  .pane { text-align: center; }
+  .pane span { display: block; font-size: 10px; color: #47586f; margin-top: 2px; }
+  canvas { image-rendering: pixelated; display: block; }
+  .lit { background: #241d1c; }
+  .sil { background: #6a7d94; }
+  .meta { margin-top: 6px; font-size: 11px; }
+  #report { padding: 0 18px 18px; white-space: pre-wrap; font-size: 12px; }
+</style>
+<header>
+  <h1>Лист спрайтов «Подземелья Некроманта»</h1>
+  <div class="hint">Слева фигура в цвете, справа она же залитая чёрным. Два похожих
+    силуэта = два одинаковых спрайта.</div>
+</header>
+<div class="grid" id="grid"></div>
+<div id="report"></div>
+
+<script type="module">
+import { MATRICES, spriteCanvas, spriteFrames } from '../sprites.js';
+import * as PAL from '../palette.js';
+
+const Q = new URLSearchParams(location.search);
+const Z = Number(Q.get(String.fromCharCode(122)))||5;   // масштаб превью: фигура 20×28 показывается 100×140, как в сцене крупным планом
+
+// Замкнутая палитра игры одним множеством — чтобы поймать цвет, заведённый мимо palette.js
+const allowed = new Set();
+for (const v of Object.values(PAL)) {
+  if (typeof v === 'string' && v[0] === '#') allowed.add(v.toLowerCase());
+  else if (Array.isArray(v)) v.forEach(c => allowed.add(c.toLowerCase()));
+  else if (v && typeof v === 'object') Object.values(v).forEach(r => r.forEach(c => allowed.add(c.toLowerCase())));
+}
+
+const hex = (r, g, b) => '#' + [r, g, b].map(n => n.toString(16).padStart(2, '0')).join('');
+
+function scaled(src, zoom, silhouette) {
+  const c = document.createElement('canvas');
+  c.width = src.width * zoom; c.height = src.height * zoom;
+  const x = c.getContext('2d');
+  x.imageSmoothingEnabled = false;
+  x.drawImage(src, 0, 0, c.width, c.height);
+  if (silhouette) {
+    // Заливаем всё непрозрачное одним чёрным: остаётся ровно силуэт и ничего больше
+    x.globalCompositeOperation = 'source-in';
+    x.fillStyle = '#000';
+    x.fillRect(0, 0, c.width, c.height);
+  }
+  return c;
+}
+
+// Приёмка одного спрайта: доля заполнения, полупрозрачные пиксели, цвета мимо палитры
+function audit(src) {
+  const c = document.createElement('canvas');
+  c.width = src.width; c.height = src.height;
+  const x = c.getContext('2d');
+  x.drawImage(src, 0, 0);
+  const a = x.getImageData(0, 0, c.width, c.height).data;
+  let solid = 0, partial = 0;
+  const stray = new Set();
+  for (let i = 0; i < a.length; i += 4) {
+    const al = a[i + 3];
+    if (al === 0) continue;
+    if (al !== 255) partial++;
+    solid++;
+    const h = hex(a[i], a[i + 1], a[i + 2]);
+    if (!allowed.has(h)) stray.add(h);
+  }
+  return { fill: solid / (c.width * c.height), partial, stray: [...stray] };
+}
+
+const grid = document.getElementById('grid');
+const problems = [];
+const sils = [];
+
+const only=(Q.get('only')||'').split(',').filter(Boolean);
+for (const name of Object.keys(MATRICES)) {
+  if (only.length && !only.includes(name)) continue;
+  const rows = MATRICES[name].rows;
+  const base = spriteCanvas(name);
+  const frames = spriteFrames(name);
+  const a = audit(base);
+
+  const card = document.createElement('div');
+  card.className = 'card';
+  const flags = [];
+  if (a.fill < 0.12 || a.fill > 0.78) flags.push(`заполнение ${(a.fill * 100) | 0}%`);
+  if (a.partial) flags.push(`полупрозрачных ${a.partial}`);
+  if (a.stray.length) flags.push('мимо палитры: ' + a.stray.join(' '));
+  if (flags.length) problems.push(name + ' — ' + flags.join('; '));
+
+  card.innerHTML = `<h2>${name}</h2>`;
+  const row = document.createElement('div');
+  row.className = 'row';
+  for (const [label, cv, cls] of [
+    ['покой', frames[0], 'lit'], ['вдох', frames[1], 'lit'], ['замах', frames[2], 'lit'],
+    ['силуэт', base, 'sil'],
+  ]) {
+    const pane = document.createElement('div');
+    pane.className = 'pane';
+    const shown = scaled(cv, Z, label === 'силуэт');
+    shown.className = cls;
+    pane.append(shown);
+    const s = document.createElement('span'); s.textContent = label;
+    pane.append(s);
+    row.append(pane);
+  }
+  card.append(row);
+  const meta = document.createElement('div');
+  meta.className = 'meta ' + (flags.length ? 'bad' : 'ok');
+  meta.textContent = `${rows[0].length}×${rows.length} · заполнение ${(a.fill * 100) | 0}%` +
+    (flags.length ? ' · ' + flags.join('; ') : ' · ок');
+  card.append(meta);
+  grid.append(card);
+
+  // Силуэт в низком разрешении — для попарного сравнения ниже
+  const s = document.createElement('canvas');
+  s.width = 20; s.height = 28;
+  const sx = s.getContext('2d');
+  sx.imageSmoothingEnabled = false;
+  sx.drawImage(base, 0, 0, 20, 28);
+  const sd = sx.getImageData(0, 0, 20, 28).data;
+  const bits = [];
+  for (let i = 3; i < sd.length; i += 4) bits.push(sd[i] > 0 ? 1 : 0);
+  sils.push({ name, bits });
+}
+
+/* Похожесть силуэтов попарно. Порог 0.90 взят из того, что заглушки 12×16 по
+   одному шаблону давали 0.93–0.97 между собой: всё, что выше 0.90, — это один
+   и тот же спрайт в разных цветах. */
+const pairs = [];
+for (let i = 0; i < sils.length; i++) for (let j = i + 1; j < sils.length; j++) {
+  const a = sils[i].bits, b = sils[j].bits;
+  let same = 0;
+  for (let k = 0; k < a.length; k++) if (a[k] === b[k]) same++;
+  const r = same / a.length;
+  if (r > 0.90) pairs.push(`${sils[i].name} ↔ ${sils[j].name}: ${(r * 100).toFixed(0)}%`);
+}
+
+document.getElementById('report').innerHTML =
+  `<b>Спрайтов:</b> ${sils.length}\n` +
+  `<b>Приёмка:</b> ${problems.length ? '<span class="bad">' + problems.join('\n') + '</span>'
+                                     : '<span class="ok">все прошли</span>'}\n` +
+  `<b>Похожие силуэты (>90%):</b> ${pairs.length ? '<span class="bad">' + pairs.join('\n') + '</span>'
+                                                 : '<span class="ok">нет</span>'}`;
+
+window.__sheet = { problems, pairs, count: sils.length };
+</script>

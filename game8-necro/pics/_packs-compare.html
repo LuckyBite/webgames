@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<meta charset="utf-8">
+<title>Некро · выбор набора спрайтов</title>
+<!-- Черновик для выбора, не часть игры. Превью хотлинком с itch.io / GitHub / OGA. -->
+<style>
+  body { margin: 0; background: #0a0810; color: #c9c2b4; font: 14px/1.45 system-ui, sans-serif; }
+  header { padding: 14px 20px 8px; border-bottom: 1px solid #3a2e2b; }
+  h1 { margin: 0; font-size: 17px; color: #e6dcc0; }
+  .sub { color: #8a8070; font-size: 12px; margin-top: 2px; }
+  .card { border-bottom: 1px solid #2a2220; padding: 12px 20px 14px; }
+  .head { display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap; margin-bottom: 6px; }
+  .n { font-size: 16px; font-weight: 700; color: #e6dcc0; }
+  .lic { font-size: 11px; padding: 2px 7px; border-radius: 3px; background: #1e3a2a; color: #8dffb0; }
+  .lic.warn { background: #4a2410; color: #ffb454; }
+  .meta { font-size: 12px; color: #8a8070; }
+  .strip { display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; background: #241d1c; padding: 8px; border-radius: 4px; }
+  .strip img { image-rendering: pixelated; display: block; }
+  .v { margin-top: 7px; font-size: 13px; }
+  .v b { color: #e6dcc0; }
+  .rec { color: #8dffb0; }
+  .no { color: #ffb454; }
+</style>
+<header>
+  <h1>Выбор набора спрайтов для «Подземелья Некроманта»</h1>
+  <div class="sub">Нужно: 16 видов нежити (4 школы × 4 тира), 6 героев, чемпионы крупнее, портрет некроманта. Фигура в сцене ≈ 60 px на 720p.</div>
+</header>
+
+<div class="card">
+  <div class="head"><span class="n">1 · Dungeon Crawl Stone Soup, 32×32</span><span class="lic">CC0</span>
+    <span class="meta">вид ¾ сверху · 1 кадр на монстра · 56 файлов только в папке undead</span></div>
+  <div class="strip" id="dcss"></div>
+  <div class="v"><b class="rec">Лучшее покрытие.</b> Есть буквально наши виды: skeletal_warrior, ghoul, necrophage, phantom, wraith, lich, ancient_lich, mummy, bone_dragon, revenant. Героев тоже сотни (люди-монстры: рыцари, жрецы, маги, лучники). 32 px близко к нашим 28, масштаб сцены не ломается. Минус: нет анимации (наш процедурный «вдох» остаётся), стиль ровный, но не «вау».</div>
+</div>
+
+<div class="card">
+  <div class="head"><span class="n">2 · Gothicvania (Ansimuz), Cemetery + Church</span><span class="lic">CC0 / royalty-free</span>
+    <span class="meta">вид сбоку, 16-бит, Castlevania · полные анимации · ~6 врагов + 2 героя бесплатно</span></div>
+  <div class="strip">
+    <img src="https://img.itch.zone/aW1hZ2UvMjY2MTUyLzI2MTI0ODM3LmdpZg==/original/dHFohK.gif" style="height:180px">
+    <img src="https://img.itch.zone/aW1hZ2UvMjY2MTUyLzI2MTI0ODYyLmdpZg==/original/RB8VED.gif" style="height:180px">
+    <img src="https://img.itch.zone/aW1hZ2UvMjY2MTUyLzI2MTI0OTc0LmdpZg==/original/SB0k44.gif" style="height:180px">
+    <img src="https://img.itch.zone/aW1hZ2UvMjY2MTUyLzI2MTI0OTM1LmdpZg==/original/Ri3B06.gif" style="height:180px">
+    <img src="https://img.itch.zone/aW1hZ2UvNDI4MDMyLzI1NzA2MzQ0LmdpZg==/original/ijbigN.gif" style="height:180px">
+    <img src="https://img.itch.zone/aW1hZ2UvNDI4MDMyLzI1NzA2MzgzLmdpZg==/original/J%2B4%2FNd.gif" style="height:180px">
+    <img src="https://img.itch.zone/aW1hZ2UvNDI4MDMyLzI3NTA0NzY1LmdpZg==/original/x%2BGu1d.gif" style="height:180px">
+    <img src="https://img.itch.zone/aW1hZ2UvNDI4MDMyLzI3NTA0NzY0LmdpZg==/original/Cjzpzz.gif" style="height:180px">
+  </div>
+  <div class="v"><b class="rec">Лучшая атмосфера.</b> Готика, темнота, именно наш вайб. Анимации полные, с смертью. Минус: врагов мало, на 16 видов не хватит, остальное у автора платно (Monster Pack на Patreon). Фигуры ~40–48 px, крупнее нашей сцены в 1.5 раза, придётся перерисовать пол и стены под этот масштаб.</div>
+</div>
+
+<div class="card">
+  <div class="head"><span class="n">3 · LuizMelo: Monsters + Evil Wizard + Warriors + Wizard + King</span><span class="lic">CC0</span>
+    <span class="meta">вид сбоку, hi-res 16-бит · по 6–8 анимаций на фигуру · ~10 бесплатных паков</span></div>
+  <div class="strip">
+    <img src="https://img.itch.zone/aW1hZ2UvNTY0Njk1LzI5Njc3OTIuZ2lm/original/v2f2cm.gif" style="height:200px">
+    <img src="https://img.itch.zone/aW1hZ2UvNTY0Njk1LzI5NjgzNjIuZ2lm/original/qNuqpx.gif" style="height:200px">
+    <img src="https://img.itch.zone/aW1hZ2UvNzMyODA0LzQxMzUxODIuZ2lm/original/tc%2FXFz.gif" style="height:200px">
+    <img src="https://img.itch.zone/aW1hZ2UvNzMyODA0LzQxMzUxODQuZ2lm/original/tb5mDO.gif" style="height:200px">
+    <img src="https://img.itch.zone/aW1hZ2UvNzMyODA0LzQxMzUxODYuZ2lm/original/G%2Fi0ln.gif" style="height:200px">
+  </div>
+  <div class="v"><b>Самая богатая анимация.</b> Скелет, гоблин, злой маг ×3 (готовые некромант/лич/колдун), рыцари ×3, маг, король, охотница. Минус: это файтинг-масштаб, фигура 70–90 px нативно, в 3 раза мельче пиксель нашей сцены. Либо ужимать (теряется рисунок, как на Ферме), либо переводить всю сцену на тонкий пиксель. Нежити из коробки мало: один скелет.</div>
+</div>
+
+<div class="card">
+  <div class="head"><span class="n">4 · Undead Asset Pack 16×16 (DeepDive)</span><span class="lic warn">free, своя лицензия, коммерция ок</span>
+    <span class="meta">16×16 · 45 нежити в 3 тирах · idle-анимация у каждого · героев нет</span></div>
+  <div class="strip">
+    <img src="https://img.itch.zone/aW1nLzE0MDI4MDEyLnBuZw==/original/q%2FMHrv.png" style="height:160px">
+    <img src="https://img.itch.zone/aW1nLzE0MDI4MDE1LnBuZw==/original/XoRYcK.png" style="height:160px">
+    <img src="https://img.itch.zone/aW1nLzE0MDI4MDE3LnBuZw==/original/LWRnZd.png" style="height:160px">
+    <img src="https://img.itch.zone/aW1nLzE0MDI4MDI5LnBuZw==/original/l9JyiR.png" style="height:160px">
+    <img src="https://img.itch.zone/aW1nLzE0MDI4MDMzLnBuZw==/original/TaLG%2Fi.png" style="height:160px">
+  </div>
+  <div class="v"><b>Сделан ровно под нашу сетку тиров.</b> 45 нежити по три яруса, с покоем. Минус: 16×16 это вдвое грубее нашей сцены, героев нет вовсе (брать из другого пака, стили разойдутся).</div>
+</div>
+
+<div class="card">
+  <div class="head"><span class="n">5 · 0x72 Dungeon Tileset II</span><span class="lic">CC0</span>
+    <span class="meta">16×16 · idle+run · герои, нежить, демоны, орки</span></div>
+  <div class="strip">
+    <img src="https://img.itch.zone/aW1hZ2UvMzA5MDI4LzExOTQ3NzgyLmdpZi8/original/W0SIsQ.gif" style="height:220px">
+    <img src="https://img.itch.zone/aW1hZ2UvMzA5MDI4LzE1MTgyMTEuZ2lm/original/MDU%2FdN.gif" style="height:220px">
+    <img src="https://img.itch.zone/aW1hZ2UvMzA5MDI4LzE1MTgyMTguZ2lm/original/t3GCLS.gif" style="height:220px">
+  </div>
+  <div class="v">Уже смотрели. Для сравнения рядом с остальными.</div>
+</div>
+
+<div class="card">
+  <div class="head"><span class="n">6 · Kenney Tiny Dungeon</span><span class="lic">CC0</span>
+    <span class="meta">16×16 · 130 тайлов · плоский чистый стиль</span></div>
+  <div class="strip">
+    <img src="https://kenney.nl/media/pages/assets/tiny-dungeon/3bb70bd831-1674742409/preview.png" style="height:200px">
+    <img src="https://kenney.nl/media/pages/assets/tiny-dungeon/8c4f705db0-1674742412/sample.png" style="height:200px">
+  </div>
+  <div class="v"><b class="no">Не наш вайб.</b> Светлый, игрушечный, без темноты. Оставил, чтобы было с чем сравнить.</div>
+</div>
+
+<div class="card">
+  <div class="head"><span class="n">Для интерфейса · Shikashi's Fantasy Icons, 32×32</span><span class="lic warn">CC-BY 4.0, нужна строка «Matt Firth, game-icons.net»</span>
+    <span class="meta">284 иконки: кости, черепа, колбы, самоцветы, статусы</span></div>
+  <div class="strip">
+    <img src="https://img.itch.zone/aW1nLzEzMjcxNjUucG5n/original/QMCG64.png" style="height:220px">
+  </div>
+  <div class="v">Закрывает таблицу останков иконками вместо «обычн. 2 / густ. 0 / крист. 0». Это уже вторая работа, интерфейс, покажу отдельно.</div>
+</div>
+
+<script>
+  // DCSS: тайлы прямо из репозитория, те же файлы, что в CC0-наборе на OpenGameArt
+  const base = 'https://raw.githubusercontent.com/crawl/crawl/master/crawl-ref/source/rltiles/mon/undead/';
+  const names = ['skeletal_warrior','ghoul','necrophage','bloated_husk','phantom','wraith','shadow_wraith','flayed_ghost',
+                 'lich','ancient_lich','mummy','vampire_knight','bone_dragon','revenant','wight','curse_skull'];
+  const box = document.getElementById('dcss');
+  for (const n of names) {
+    const w = document.createElement('div'); w.style.textAlign = 'center';
+    const i = new Image(); i.src = base + n + '.png'; i.style.height = '96px'; i.style.imageRendering = 'pixelated';
+    i.onerror = () => { w.remove(); };
+    const c = document.createElement('div'); c.textContent = n; c.style.cssText = 'font-size:10px;color:#8a8070;margin-top:2px';
+    w.append(i, c); box.append(w);
+  }
+</script>

@@ -1,0 +1,409 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Стенд стола · Удачный Квартал</title>
+<!--
+  Второй стенд-линейка: не один остров, а стол целиком — свой город, чужие города и
+  кубик в центре. Отвечает на вопрос, который спором не решается:
+    1) влезает ли за стол четвёртый игрок или комфортно только трое;
+    2) какая раскладка стола держит правило 70% в обеих ориентациях;
+    3) не проваливается ли тайл своего острова ниже 44 px (тач-таргет, п. 1.8 Яндекса) —
+       именно этот замер, а не «красиво/некрасиво», ограничивает число игроков.
+  Геометрия — серые заглушки. Земля, дома и крыши идут InstancedMesh: на прошлом стенде
+  один остров стоил 185 draw calls, четыре обычными мешами были бы неиграбельны.
+-->
+<script type="importmap">
+{ "imports": { "three": "./vendor/three.module.min.js" } }
+</script>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%;overflow:hidden;background:#cfd6dd;font:13px/1.4 system-ui,sans-serif;color:#26313a}
+  canvas{display:block;position:fixed;inset:0}
+  #panel{position:fixed;background:rgba(255,255,255,.88);backdrop-filter:blur(6px);
+         border-radius:12px;padding:10px 12px;display:grid;gap:7px;box-shadow:0 4px 16px rgba(0,0,0,.12)}
+  @media (orientation:portrait){ #panel{left:8px;right:8px;bottom:8px} }
+  @media (orientation:landscape){ #panel{top:8px;right:8px;width:262px} }
+  .row{display:grid;grid-template-columns:78px 1fr 44px;align-items:center;gap:8px}
+  .row b{font-weight:600}
+  input[type=range]{width:100%}
+  .val{text-align:right;font-variant-numeric:tabular-nums;opacity:.7}
+  .btns{display:flex;gap:6px;flex-wrap:wrap}
+  button{flex:1;min-height:34px;min-width:56px;border:0;border-radius:8px;background:#e2e7ec;color:#26313a;
+         font:inherit;font-weight:600;cursor:pointer}
+  button.on{background:#26313a;color:#fff}
+  #stats{font-variant-numeric:tabular-nums;display:grid;grid-template-columns:1fr 1fr;gap:2px 10px;
+         border-top:1px solid #d5dbe1;padding-top:7px}
+  #stats i{font-style:normal;opacity:.6}
+  .bad{color:#b03030;font-weight:700}
+  .good{color:#2c7a4b;font-weight:700}
+</style>
+</head>
+<body>
+<canvas id="scene"></canvas>
+
+<div id="panel">
+  <div class="btns" id="players-btns">
+    <button data-p="1">1 в кадре</button><button data-p="2">2</button><button data-p="3">3</button><button data-p="4">4</button>
+  </div>
+  <div class="btns" id="shape-btns">
+    <button data-s="square">Остров квадрат</button><button data-s="adaptive">Под ориентацию</button>
+  </div>
+  <div class="btns" id="layout-btns">
+    <button data-l="ring">Круг</button><button data-l="hero">Свой крупно</button><button data-l="line">Лента</button>
+  </div>
+  <div class="row"><b>Остров</b><input id="grid" type="range" min="4" max="9" value="6"><span class="val" id="grid-v">6×6</span></div>
+  <div class="row"><b>Чужие</b><input id="foe" type="range" min="35" max="100" value="70"><span class="val" id="foe-v">70%</span></div>
+  <div class="row"><b>Наклон</b><input id="tilt" type="range" min="30" max="85" value="55"><span class="val" id="tilt-v">55°</span></div>
+  <div class="row"><b>UI игры</b><input id="ui" type="range" min="60" max="320" value="140"><span class="val" id="ui-v">140</span></div>
+  <div class="row"><b>Зазор</b><input id="gap" type="range" min="10" max="120" value="45"><span class="val" id="gap-v">4.5</span></div>
+  <div id="stats">
+    <span><i>кадр занят</i> <b id="cov">—</b></span><span><i>свой тайл</i> <b id="tile">—</b></span>
+    <span><i>чужой тайл</i> <b id="ftile">—</b></span><span><i>fps</i> <b id="fps">—</b></span>
+    <span><i>треугольники</i> <b id="tri">—</b></span><span><i>draw calls</i> <b id="dc">—</b></span>
+    <span><i>вьюпорт</i> <b id="vp">—</b></span><span><i>ориентация</i> <b id="ori">—</b></span>
+  </div>
+</div>
+
+<!-- Модуль с importmap с диска (file://) не грузится — обычный скрипт объясняет, что делать. -->
+<script>
+if (location.protocol === 'file:') {
+  document.getElementById('panel').remove();
+  document.body.insertAdjacentHTML('beforeend',
+    '<div style="position:fixed;inset:0;display:grid;place-content:center;gap:10px;text-align:center;' +
+    'padding:24px;font:15px/1.5 system-ui,sans-serif;color:#26313a;background:#cfd6dd">' +
+    '<b style="font-size:18px">Стенд открыт с диска</b>' +
+    '<div>three.js подключён как ES-модуль — по протоколу <code>file://</code> браузер его не грузит.</div>' +
+    '<div>Запустите сервер и откройте по http:<br>' +
+    '<code style="display:inline-block;margin-top:6px;padding:6px 10px;background:#fff;border-radius:6px">' +
+    'node serve.js 8783</code><br>' +
+    '<a href="http://localhost:8783/game9-city/table-lab.html">localhost:8783/game9-city/table-lab.html</a></div></div>');
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+
+const canvas = document.getElementById('scene');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFShadowMap;
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0xcfd6dd);
+
+// Свет по ART.md: один направленный источник с зафиксированным углом + холодный подсвет неба.
+const sun = new THREE.DirectionalLight(0xfff2df, 2.1);
+sun.position.set(-14, 20, 14);
+sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+Object.assign(sun.shadow.camera, { left: -26, right: 26, top: 26, bottom: -26, near: 1, far: 70 });
+scene.add(sun, new THREE.HemisphereLight(0xbcd4e6, 0x6b7a86, 0.85));
+
+const camera = new THREE.OrthographicCamera(-10, 10, 10, -10, 0.1, 200);
+scene.add(camera);
+
+// столешница: за краем островов ничего нет — это предмет, а не мир
+const felt = new THREE.Mesh(new THREE.PlaneGeometry(200, 200),
+                            new THREE.MeshLambertMaterial({ color: 0x8fa8b8 }));
+felt.rotation.x = -Math.PI / 2; felt.position.y = -0.45; felt.receiveShadow = true;
+scene.add(felt);
+
+// ---------- стол ----------
+const table = new THREE.Group();
+scene.add(table);
+
+const GEO = {
+  box:  new THREE.BoxGeometry(1, 1, 1),
+  cone: new THREE.ConeGeometry(0.62, 0.5, 4),
+};
+const MAT = () => new THREE.MeshLambertMaterial();
+
+let players = 4, layout = 'ring', N = 6, foeScale = 0.70, gap = 4.5, tilt = 55, zoom = 1;
+// сколько пикселей забирает интерфейс ИГРЫ: снизу в портрете, справа в альбоме
+let uiPx = 140;
+let ownPos = new THREE.Vector3(), ownScale = 1, foePos = new THREE.Vector3(), foeS = 1;
+
+// Раскладка стола. Позиции считаются от ориентации: в альбомной стол растягивается вширь,
+// в портретной — вглубь, иначе один из вариантов всегда проваливает 70%.
+// Форма острова: квадрат N×N либо вытянутый под ориентацию — в портрете глубокий,
+// в альбоме широкий. Второй режим нужен, чтобы проверить гипотезу «один остров в кадре».
+let shape = 'square', stretch = 1.7;   // во сколько раз длинная сторона острова длиннее короткой
+function islandDims(land) {
+  if (shape === 'square') return [N, N];
+  const long = Math.round(N * stretch);
+  return land ? [long, N] : [N, long];
+}
+
+function seats(land) {
+  if (players === 1) return [{ x: 0, z: 0, s: 1, own: true }];
+  const step = N + gap;
+  const wide = land ? 1.15 : 0.72, deep = land ? 0.72 : 1.15;
+  if (layout === 'hero') {
+    // свой остров крупно спереди, чужие уменьшенным рядом позади
+    const out = [{ x: 0, z: step * 0.55 * deep, s: 1, own: true }];
+    const n = players - 1, spread = step * wide;
+    for (let i = 0; i < n; i++)
+      out.push({ x: (i - (n - 1) / 2) * spread * (n > 1 ? 1 : 0), z: -step * 0.5 * deep, s: foeScale, own: false });
+    return out;
+  }
+  if (layout === 'line') {
+    // лента вдоль длинной оси экрана: свой у ближнего конца, чужие уходят вглубь колонной
+    // (портрет) или в ряд (альбом). Силуэт стола повторяет пропорции экрана — единственный
+    // способ добрать 70% в портрете, круг и «свой крупно» дают квадратное пятно.
+    const out = [];
+    const spacing = N * (1 + foeScale) / 2 + gap;
+    for (let i = 0; i < players; i++) {
+      const d = i === 0 ? 0 : spacing * (0.55 + (i - 1) * foeScale * 1.05);
+      out.push(land ? { x: -spacing * 0.9 + d * 1.35, z: 0, s: i ? foeScale : 1, own: !i }
+                    : { x: 0, z: spacing * 0.9 - d * 1.35, s: i ? foeScale : 1, own: !i });
+    }
+    return out;
+  }
+  // стол по кругу: свой снизу, дальше по часовой
+  const ring = [
+    { x: 0, z: step * 0.62 * deep, own: true },
+    { x: -step * 0.62 * wide, z: 0 }, { x: 0, z: -step * 0.62 * deep }, { x: step * 0.62 * wide, z: 0 },
+  ];
+  if (players === 2) return [ring[0], ring[2]].map((s, i) => ({ ...s, s: i ? foeScale : 1, own: !i }));
+  if (players === 3) return [ring[0], ring[1], ring[3]].map((s, i) => ({ ...s, s: i ? foeScale : 1, own: !i }));
+  return ring.map((s, i) => ({ ...s, s: i ? foeScale : 1, own: !i }));
+}
+
+let seed = 1;
+const rnd = () => (seed = (seed * 1664525 + 1013904223) % 4294967296) / 4294967296;
+const M = new THREE.Matrix4(), Q = new THREE.Quaternion(), P = new THREE.Vector3(), S = new THREE.Vector3();
+const C = new THREE.Color();
+
+function build() {
+  table.clear();
+  seed = 1;
+  const land = innerWidth > innerHeight;
+  const seatList = seats(land);
+  const ground = [], walls = [], roofs = [];
+
+  for (const seat of seatList) {
+    const seatM = new THREE.Matrix4().compose(
+      P.set(seat.x, 0, seat.z), Q.identity(), S.set(seat.s, seat.s, seat.s));
+    if (seat.own) { ownPos.set(seat.x, 0, seat.z); ownScale = seat.s; }
+    else if (!foeS || foeS === 1) { foePos.set(seat.x, 0, seat.z); foeS = seat.s; }
+
+    const [NX, NZ] = islandDims(land);
+    const halfX = (NX - 1) / 2, halfZ = (NZ - 1) / 2;
+    for (let x = 0; x < NX; x++) for (let z = 0; z < NZ; z++) {
+      const px = x - halfX, pz = z - halfZ;
+      // земля: свой остров теплее чужих — это единственное отличие, силуэт одинаковый
+      const g = new THREE.Matrix4().compose(P.set(px, -0.2, pz), Q.identity(), S.set(1, 0.4, 1));
+      ground.push([seatM.clone().multiply(g), seat.own ? (rnd() > .5 ? 0xa8b797 : 0x9fae8e)
+                                                       : (rnd() > .5 ? 0x93a496 : 0x8b9c8e)]);
+      if (rnd() > 0.55) continue;
+      const h = 0.5 + rnd() * 0.7;                     // потолок 1.2 тайла — замер камера-стенда
+      const b = new THREE.Matrix4().compose(P.set(px, h / 2, pz), Q.identity(), S.set(0.72, h, 0.72));
+      walls.push([seatM.clone().multiply(b), seat.own ? 0xe0dacf : 0xd2ccc2]);
+      if (rnd() > .5) {
+        Q.setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI / 4);
+        const r = new THREE.Matrix4().compose(P.set(px, h + 0.25, pz), Q, S.set(1, 1, 1));
+        roofs.push([seatM.clone().multiply(r), 0xb08b72]);
+        Q.identity();
+      }
+    }
+  }
+
+  for (const [geo, list] of [[GEO.box, ground], [GEO.box, walls], [GEO.cone, roofs]]) {
+    if (!list.length) continue;
+    const im = new THREE.InstancedMesh(geo, MAT(), list.length);
+    im.castShadow = geo === GEO.box ? true : true;
+    im.receiveShadow = true;
+    list.forEach(([m, c], i) => { im.setMatrixAt(i, m); im.setColorAt(i, C.set(c)); });
+    im.instanceMatrix.needsUpdate = true; im.instanceColor.needsUpdate = true;
+    table.add(im);
+  }
+
+  // кубик в центре стола — якорь камеры, он не двигается никогда.
+  // В режиме «1 в кадре» центр занят островом, кубик ушёл бы внутрь земли.
+  if (players === 1) return;
+  const die = new THREE.Mesh(new THREE.BoxGeometry(1.1, 1.1, 1.1),
+                             new THREE.MeshLambertMaterial({ color: 0xf5f1e8 }));
+  // В круге кубик лежит в центре стола, в ленте и «своём крупно» — в зазоре между своим
+  // городом и ближайшим чужим, иначе он оказывается внутри чужой земли.
+  const dieAt = layout === 'ring' ? new THREE.Vector3(0, 0, 0)
+                                   : ownPos.clone().add(foePos).multiplyScalar(0.5);
+  die.position.set(dieAt.x, 0.55, dieAt.z); die.castShadow = true; die.receiveShadow = true;
+  table.add(die);
+  const pipG = new THREE.BoxGeometry(0.17, 0.06, 0.17);
+  const pipM = new THREE.MeshLambertMaterial({ color: 0x2f3a42 });
+  for (const [px, pz] of [[-0.3, -0.3], [0.3, -0.3], [0, 0], [-0.3, 0.3], [0.3, 0.3]]) {
+    const pip = new THREE.Mesh(pipG, pipM);
+    pip.position.set(dieAt.x + px, 1.11, dieAt.z + pz); table.add(pip);
+  }
+}
+
+// ---------- камера ----------
+function place() {
+  const t = THREE.MathUtils.degToRad(tilt), d = 60;
+  camera.position.set(0, Math.sin(t) * d, Math.cos(t) * d);
+  camera.lookAt(0, 0, 0);
+  fit();
+}
+
+const camBox = new THREE.Box3(), cornerV = new THREE.Vector3(), tmpBox = new THREE.Box3();
+const panel = document.getElementById('panel');
+function fit() {
+  const W = innerWidth || document.documentElement.clientWidth;
+  const H = innerHeight || document.documentElement.clientHeight;
+  if (W < 2 || H < 2) return;                    // свёрнутая вкладка: без гварда камера уходит в NaN
+  renderer.setSize(W, H, false);
+  camera.updateMatrixWorld(true);
+
+  camBox.makeEmpty();
+  table.traverse(o => {
+    if (!o.isMesh) return;
+    tmpBox.setFromObject(o);
+    for (let i = 0; i < 8; i++) {
+      cornerV.set(i & 1 ? tmpBox.max.x : tmpBox.min.x, i & 2 ? tmpBox.max.y : tmpBox.min.y,
+                  i & 4 ? tmpBox.max.z : tmpBox.min.z).applyMatrix4(camera.matrixWorldInverse);
+      camBox.expandByPoint(cornerV);
+    }
+  });
+  const iw = camBox.max.x - camBox.min.x, ih = camBox.max.y - camBox.min.y;
+  const cx = (camBox.max.x + camBox.min.x) / 2, cy = (camBox.max.y + camBox.min.y) / 2;
+
+  const land = W > H;
+  const rectW = Math.max(80, land ? W - uiPx : W);
+  const rectH = Math.max(80, land ? H : H - uiPx);
+
+  const wpp = Math.max(iw / rectW, ih / rectH) * 1.05 / zoom;
+  const halfW = W * wpp / 2, halfH = H * wpp / 2;
+  const Cx = cx - halfW * (2 * (rectW / 2) / W - 1);
+  const Cy = cy - halfH * (1 - 2 * (rectH / 2) / H);
+  camera.left = Cx - halfW; camera.right = Cx + halfW;
+  camera.top = Cy + halfH; camera.bottom = Cy - halfH;
+  camera.updateProjectionMatrix();
+
+  vpEl.textContent = `${W}×${H}`;
+  oriEl.textContent = land ? 'альбом' : 'портрет';
+}
+
+// ---------- замеры ----------
+const v = new THREE.Vector3();
+function toPx(x, y, z) {
+  v.set(x, y, z).project(camera);
+  return [(v.x + 1) / 2 * innerWidth, (1 - v.y) / 2 * innerHeight];
+}
+function tilePx(origin, s) {
+  const a = toPx(origin.x, 0, origin.z), b = toPx(origin.x + s, 0, origin.z);
+  return Math.round(Math.hypot(b[0] - a[0], b[1] - a[1]));
+}
+function coverage() {
+  let minX = 1, maxX = -1, minY = 1, maxY = -1;
+  table.traverse(o => {
+    if (!o.isMesh) return;
+    tmpBox.setFromObject(o);
+    for (let i = 0; i < 8; i++) {
+      v.set(i & 1 ? tmpBox.max.x : tmpBox.min.x, i & 2 ? tmpBox.max.y : tmpBox.min.y,
+            i & 4 ? tmpBox.max.z : tmpBox.min.z).project(camera);
+      if (v.x < minX) minX = v.x; if (v.x > maxX) maxX = v.x;
+      if (v.y < minY) minY = v.y; if (v.y > maxY) maxY = v.y;
+    }
+  });
+  const w = Math.min(maxX, 1) - Math.max(minX, -1), h = Math.min(maxY, 1) - Math.max(minY, -1);
+  return Math.max(0, Math.round(w * h / 4 * 100));
+}
+
+// ---------- панель ----------
+const $ = id => document.getElementById(id);
+const vpEl = $('vp'), oriEl = $('ori'), covEl = $('cov'), tileEl = $('tile'), ftileEl = $('ftile'),
+      fpsEl = $('fps'), triEl = $('tri'), dcEl = $('dc');
+
+const rebuild = () => { foeS = 1; build(); place(); };
+$('players-btns').onclick = e => {
+  if (!e.target.dataset.p) return;
+  players = +e.target.dataset.p; syncBtns(); rebuild();
+};
+$('shape-btns').onclick = e => {
+  if (!e.target.dataset.s) return;
+  shape = e.target.dataset.s; syncBtns(); rebuild();
+};
+$('layout-btns').onclick = e => {
+  if (!e.target.dataset.l) return;
+  layout = e.target.dataset.l; syncBtns(); rebuild();
+};
+function syncBtns() {
+  for (const b of $('players-btns').children) b.classList.toggle('on', +b.dataset.p === players);
+  for (const b of $('layout-btns').children) b.classList.toggle('on', b.dataset.l === layout);
+  for (const b of $('shape-btns').children) b.classList.toggle('on', b.dataset.s === shape);
+}
+$('grid').oninput = e => { N = +e.target.value; $('grid-v').textContent = `${N}×${N}`; rebuild(); };
+$('foe').oninput  = e => { foeScale = +e.target.value / 100; $('foe-v').textContent = e.target.value + '%'; rebuild(); };
+$('tilt').oninput = e => { tilt = +e.target.value; $('tilt-v').textContent = tilt + '°'; place(); };
+$('ui').oninput   = e => { uiPx = +e.target.value; $('ui-v').textContent = uiPx; fit(); };
+$('gap').oninput  = e => { gap = +e.target.value / 10; $('gap-v').textContent = gap.toFixed(1); rebuild(); };
+syncBtns();
+
+addEventListener('resize', () => rebuild());
+new ResizeObserver(() => fit()).observe(document.body);
+
+// Стенд скриптуемый: матрицу «игроки × раскладка × ориентация» снимаем прогоном, а не
+// щелчками по панели. Замеры считаются здесь же, а не читаются из подписей.
+function measure() {
+  return {
+players, layout, shape, stretch, N, ui: uiPx, island: islandDims(innerWidth > innerHeight).join('×'), foe: foeScale, gap, tilt,
+    vp: `${innerWidth}×${innerHeight}`, ori: innerWidth > innerHeight ? 'альбом' : 'портрет',
+    cov: coverage(), ownTile: tilePx(ownPos, ownScale), foeTile: tilePx(foePos, foeS),
+    tris: renderer.info.render.triangles, calls: renderer.info.render.calls,
+  };
+}
+window.lab = {
+  measure,
+  set(cfg = {}) {
+    if (cfg.players !== undefined) players = cfg.players;
+    if (cfg.layout  !== undefined) layout  = cfg.layout;
+    if (cfg.shape   !== undefined) shape   = cfg.shape;
+    if (cfg.stretch !== undefined) stretch = cfg.stretch;
+    if (cfg.N       !== undefined) N       = cfg.N;
+    if (cfg.foe     !== undefined) foeScale = cfg.foe;
+    if (cfg.gap     !== undefined) gap     = cfg.gap;
+    if (cfg.ui      !== undefined) uiPx    = cfg.ui;
+    if (cfg.tilt    !== undefined) tilt    = cfg.tilt;
+    $('grid').value = N; $('grid-v').textContent = `${N}×${N}`;
+    $('foe').value = Math.round(foeScale * 100); $('foe-v').textContent = Math.round(foeScale * 100) + '%';
+    $('ui').value = uiPx; $('ui-v').textContent = uiPx;
+    $('gap').value = Math.round(gap * 10); $('gap-v').textContent = gap.toFixed(1);
+    $('tilt').value = tilt; $('tilt-v').textContent = tilt + '°';
+    syncBtns(); foeS = 1; build(); place();
+    renderer.render(scene, camera);      // чтобы счётчики draw calls были от текущего кадра
+    return measure();
+  },
+};
+
+let last = performance.now(), frames = 0, acc = 0, lastW = 0, lastH = 0;
+function loop(t) {
+  acc += t - last; last = t; frames++;
+  // сторож размера в цикле: resize и ResizeObserver доставляются только когда страница рисует
+  if (innerWidth !== lastW || innerHeight !== lastH) {
+    const flip = (lastW > lastH) !== (innerWidth > innerHeight);
+    lastW = innerWidth; lastH = innerHeight;
+    flip ? rebuild() : fit();
+  }
+  if (acc > 400) {
+    fpsEl.textContent = Math.round(frames * 1000 / acc);
+    const cov = coverage();
+    covEl.textContent = cov + '%'; covEl.className = cov >= 70 ? 'good' : 'bad';
+    const own = tilePx(ownPos, ownScale), foe = tilePx(foePos, foeS);
+    tileEl.textContent = own + ' px';  tileEl.className  = own >= 44 ? 'good' : 'bad';
+    ftileEl.textContent = foe + ' px'; ftileEl.className = foe >= 22 ? '' : 'bad';
+    triEl.textContent = renderer.info.render.triangles.toLocaleString('ru');
+    dcEl.textContent = renderer.info.render.calls;
+    frames = 0; acc = 0;
+  }
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+build();
+place();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

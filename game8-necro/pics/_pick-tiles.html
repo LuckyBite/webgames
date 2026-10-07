@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<meta charset="utf-8">
+<title>Некро · выбор тайлов</title>
+<!-- Черновик выбора, не часть игры. Тайлы хотлинком из репозитория DCSS (public domain / CC0). -->
+<style>
+  body { margin: 0; background: #0a0810; color: #c9c2b4; font: 13px/1.4 system-ui, sans-serif; padding-bottom: 150px; }
+  header { position: sticky; top: 0; z-index: 2; background: #0a0810; padding: 10px 16px; border-bottom: 1px solid #3a2e2b; display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
+  h1 { margin: 0; font-size: 16px; color: #e6dcc0; }
+  label { cursor: pointer; user-select: none; }
+  .grp { padding: 4px 16px 0; color: #8dffb0; font-weight: 700; font-size: 14px; margin-top: 12px; }
+  .row { display: flex; gap: 10px; align-items: center; padding: 6px 16px; border-bottom: 1px solid #1c1716; }
+  .who { width: 170px; flex: 0 0 auto; }
+  .who b { color: #e6dcc0; display: block; }
+  .who span { color: #8a8070; font-size: 11px; }
+  .cands { display: flex; gap: 6px; flex-wrap: wrap; }
+  .c { background: #241d1c; border: 2px solid transparent; border-radius: 4px; padding: 3px; text-align: center; cursor: pointer; width: 104px; }
+  .c:hover { border-color: #52413c; }
+  .c.on { border-color: #8dffb0; background: #1e3a2a; }
+  .c canvas { image-rendering: pixelated; width: 96px; height: 96px; display: block; }
+  .c i { font-style: normal; font-size: 10px; color: #8a8070; display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .c em { font-style: normal; color: #e6dcc0; font-weight: 700; }
+  footer { position: fixed; left: 0; right: 0; bottom: 0; background: #14100f; border-top: 1px solid #3a2e2b; padding: 8px 16px; }
+  footer textarea { width: 100%; height: 70px; background: #0a0810; color: #8dffb0; border: 1px solid #3a2e2b; font: 11px monospace; }
+</style>
+<header>
+  <h1>Кликни по одному тайлу в каждой строке</h1>
+  <label><input type="radio" name="mode" value="pal" checked> в палитре школы (как будет в игре)</label>
+  <label><input type="radio" name="mode" value="orig"> оригинал</label>
+  <span style="color:#8a8070">Выбор сохраняется в браузере. Внизу строка, её можно скопировать мне.</span>
+</header>
+<div id="list"></div>
+<footer><textarea id="out" readonly></textarea></footer>
+
+<script>
+const BASE = 'https://raw.githubusercontent.com/crawl/crawl/master/crawl-ref/source/rltiles/mon/';
+const U = n => 'undead/' + n, Z = n => 'undead/zombies/' + n, DR = n => 'undead/draugr/' + n,
+      SP = n => 'undead/spectrals/' + n, UN = n => 'unique/' + n, V = n => 'vault/' + n;
+
+// Рампы: три ступени школы из palette.js + две промежуточные, как в предложенной палитре на 43 цвета
+const mix = (a, b) => '#' + [1, 3, 5].map(i => Math.round((parseInt(a.substr(i, 2), 16) + parseInt(b.substr(i, 2), 16)) / 2).toString(16).padStart(2, '0')).join('');
+const r5 = r => [r[0], mix(r[0], r[1]), r[1], mix(r[1], r[2]), r[2]];
+const RAMP = {
+  bone: r5(['#4a4638', '#9a9078', '#e6dcc0']),
+  rot:  r5(['#2c3a1c', '#5d7a34', '#a8c85a']),
+  soul: r5(['#1e3a4a', '#3f7d96', '#8fdcf0']),
+  dust: r5(['#2e1e42', '#6a4a90', '#bf8fff']),
+  cold: ['#1b2230', '#2e3b50', '#47586f', '#6a7d94', '#9fb2c4'],
+};
+const OUTLINE = '#14100f';
+
+const GROUPS = [
+  ['Костяные', 'bone', [
+    ['skeleton',   'Скелет · T1',            [U('skeletal_warrior'), DR('draugr_humanoid_small'), DR('draugr_humanoid_medium'), U('wight'), U('profane_servitor')]],
+    ['boneArcher', 'Костяной лучник · T2',   [U('wight'), DR('draugr_humanoid_medium'), U('skeletal_warrior'), U('revenant'), U('phantasmal_warrior')]],
+    ['boneGuard',  'Скелет-щитоносец · T3',  [U('ancient_champion'), V('antique_champion'), U('undying_armoury'), U('revenant'), DR('draugr_humanoid_large')]],
+    ['boneGolem',  'Костяной голем · T4',    [U('bone_dragon'), DR('draugr_humanoid_large'), DR('draugr_troll'), U('marrowcuda'), U('death_cob')]],
+  ]],
+  ['Гнилые', 'rot', [
+    ['corpse',   'Ходячий труп · T1',      [Z('zombie_human'), Z('zombie_small'), Z('zombie_elf'), U('bog_body'), Z('zombie_orc')]],
+    ['plague',   'Чумной носитель · T2',   [U('bloated_husk'), U('mummy'), U('putrid_mouth'), V('bog_mummy'), U('jiangshi')]],
+    ['brute',    'Гнилой громила · T3',    [Z('zombie_large'), Z('zombie_ogre'), Z('zombie_troll'), U('guardian_mummy'), U('searing_wretch')]],
+    ['meatHill', 'Мясная гора · T4',       [U('putrid_mouth'), Z('zombie_juggernaut'), Z('zombie_x'), U('glowmurk_ghast'), Z('zombie_ugly_thing')]],
+  ]],
+  ['Призрачные', 'soul', [
+    ['shade',   'Тень · T1',     [U('ghost'), U('lost_soul'), U('soul_wisp'), U('martyred_shade'), U('drowned_soul')]],
+    ['banshee', 'Баньши · T2',   [U('silent_spectre'), U('flayed_ghost'), U('poltergeist'), U('drowned_soul'), SP('spectral_elf')]],
+    ['phantom', 'Фантом · T3',   [U('phantom'), U('wraith'), U('freezing_wraith'), U('eidolon'), SP('spectral_humanoid')]],
+    ['reaper',  'Жнец · T4',     [U('shadow_wraith'), U('shadowghast'), U('wraith'), UN('azrael'), SP('spectral_large')]],
+  ]],
+  ['Проклятые', 'dust', [
+    ['dustling', 'Прахолов · T1',           [U('curse_skull'), U('laughing_skull'), U('weeping_skull'), U('death_scarab'), U('cognitogaunt')]],
+    ['sorcerer', 'Костяной колдун · T2',    [U('mummy_priest'), U('vampire_mage'), U('halazid_warlock'), U('revenant_soulmonger'), U('stoker')]],
+    ['ghoul',    'Некрофаг · T3',           [U('necrophage'), U('ghoul'), U('vampire'), U('cognitogaunt'), U('searing_wretch')]],
+    ['lichling', 'Лич-прислужник · T4',     [U('lich'), U('ancient_lich'), U('dread_lich'), U('royal_mummy'), UN('boris')]],
+  ]],
+  ['Герои (холодная сталь)', 'cold', [
+    ['militia',   'Ополченец',  [UN('edmund'), UN('harold'), UN('jeremiah'), UN('maurice'), UN('robin'), UN('grum')]],
+    ['mercenary', 'Наёмник',    [UN('frederick'), UN('donald'), UN('louise'), UN('norris'), UN('margery'), UN('josephina')]],
+    ['archer',    'Лучник',     [UN('nessos'), UN('sonja'), UN('joseph'), UN('roxanne'), UN('jessica'), UN('natasha')]],
+    ['priest',    'Жрец',       [UN('agnes'), UN('ignacio'), UN('eustachio'), UN('kirke'), UN('josephine'), UN('mennas')]],
+    ['mage',      'Маг',        [UN('nikola'), UN('jorgrun'), UN('frances'), UN('cassandra'), UN('erolcha'), UN('enchantress')]],
+    ['paladin',   'Паладин',    [UN('erica'), UN('duvessa'), UN('dowan'), UN('boris'), UN('maggie'), UN('nergalle')]],
+  ]],
+];
+
+let mode = 'pal';
+let pick = {};
+try { pick = JSON.parse(localStorage.getItem('necro_pick') || '{}'); } catch {}
+const cells = [];
+
+function luma(r, g, b) { return 0.299 * r + 0.587 * g + 0.114 * b; }
+
+// Тот же приём, что art-lab: светлота кадра нормализуется и раскладывается по ступеням рампы
+function toRamp(img, ramp) {
+  const c = document.createElement('canvas'); c.width = img.width; c.height = img.height;
+  const x = c.getContext('2d'); x.drawImage(img, 0, 0);
+  const d = x.getImageData(0, 0, c.width, c.height), a = d.data;
+  let lo = 255, hi = 0;
+  for (let i = 0; i < a.length; i += 4) if (a[i + 3] > 127) { const l = luma(a[i], a[i + 1], a[i + 2]); lo = Math.min(lo, l); hi = Math.max(hi, l); }
+  const span = Math.max(1, hi - lo);
+  const hex = h => [1, 3, 5].map(i => parseInt(h.substr(i, 2), 16));
+  for (let i = 0; i < a.length; i += 4) {
+    if (a[i + 3] <= 127) { a[i + 3] = 0; continue; }
+    let t = (luma(a[i], a[i + 1], a[i + 2]) - lo) / span;
+    t = Math.min(1, Math.max(0, (t - 0.5) * 1.35 + 0.5 + 0.11));
+    const col = t < 0.1 ? OUTLINE : ramp[Math.min(4, Math.floor(t * 5))];
+    const [r, g, b] = hex(col);
+    a[i] = r; a[i + 1] = g; a[i + 2] = b; a[i + 3] = 255;
+  }
+  x.putImageData(d, 0, 0);
+  return c;
+}
+
+function paint(cell) {
+  const { cv, img, ramp } = cell;
+  if (!img.complete || !img.naturalWidth) return;
+  const x = cv.getContext('2d');
+  x.imageSmoothingEnabled = false;
+  x.clearRect(0, 0, 32, 32);
+  x.drawImage(mode === 'pal' ? (cell.q ||= toRamp(img, ramp)) : img, 0, 0);
+}
+
+function out() {
+  document.getElementById('out').value = Object.entries(pick).map(([k, v]) => `${k}=${v.split('/').pop()}`).join('  ');
+  try { localStorage.setItem('necro_pick', JSON.stringify(pick)); } catch {}
+}
+
+const list = document.getElementById('list');
+for (const [title, school, rows] of GROUPS) {
+  const g = document.createElement('div'); g.className = 'grp'; g.textContent = title; list.append(g);
+  for (const [key, name, cands] of rows) {
+    const row = document.createElement('div'); row.className = 'row';
+    row.innerHTML = `<div class="who"><b>${name}</b><span>${key}</span></div>`;
+    const box = document.createElement('div'); box.className = 'cands';
+    cands.forEach((path, i) => {
+      const c = document.createElement('div'); c.className = 'c' + (pick[key] === path ? ' on' : '');
+      const cv = document.createElement('canvas'); cv.width = 32; cv.height = 32;
+      const img = new Image(); img.crossOrigin = 'anonymous';
+      const cell = { cv, img, ramp: RAMP[school] };
+      img.onload = () => paint(cell);
+      img.onerror = () => c.remove();
+      img.src = BASE + path + '.png';
+      cells.push(cell);
+      const lab = document.createElement('i'); lab.innerHTML = `<em>${i + 1}</em> ${path.split('/').pop()}`;
+      c.append(cv, lab);
+      c.onclick = () => { pick[key] = path; box.querySelectorAll('.c').forEach(e => e.classList.remove('on')); c.classList.add('on'); out(); };
+      box.append(c);
+    });
+    row.append(box); list.append(row);
+  }
+}
+document.querySelectorAll('input[name=mode]').forEach(r => r.onchange = () => { mode = r.value; cells.forEach(paint); });
+out();
+</script>

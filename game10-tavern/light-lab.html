@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Таверна — стенд света</title>
+<style>
+  body { margin: 0; background: #120b07; color: #d8c6a4; font: 13px system-ui; }
+  .row { display: flex; flex-wrap: wrap; gap: 14px; padding: 10px; align-items: flex-start; }
+  figure { margin: 0; } figcaption { padding: 4px 0; }
+  canvas { display: block; background: #000; }
+</style>
+</head>
+<body>
+<div class="row" id="root"></div>
+<script type="module">
+// Стенд света (light.js): зал и кухня с гостями «без света / со светом» рядом, портрет и альбом.
+// Параметры: ?e=0..1 — вечер (доля свечи), ?fog=0..1 — туман главы, ?feast=1 — пир,
+// ?t=10.3 — заморозить время, ?w=375&h=812 — один размер.
+// window.snapAll(dir, t) — снять все клетки в PNG через /upload (dpr 2).
+import { computeLayout } from './layout.js';
+import { Shift } from './shift.js';
+import { drawHall } from './hall.js';
+import { drawKitchen } from './kitchen.js';
+import { lightHall, lightKitchen, contactShadow } from './light.js';
+
+const P = new URLSearchParams(location.search);
+const PANTRY = ['bread', 'cheese', 'onion', 'meat', 'mushroom', 'honey', 'berries', 'pepper'];
+const SIZES = P.get('w') ? [[+P.get('w'), +P.get('h')]] : [[375, 812], [812, 375]];
+const EVENING = P.has('e') ? +P.get('e') : 0.3;
+const FOG = P.has('fog') ? +P.get('fog') : 0.5;
+const SEATS = 5;
+
+// Смена с гостями: трое ждут, у одного заказ принят, мясо на огне, на тарелке хлеб с сыром.
+function build(w, h) {
+  const s = new Shift({ seed: 11, autoArrive: false, setup: {
+    hearthSlots: 2, cauldronSlots: 1, seats: SEATS,
+    sky: { fog: FOG, dawn: false },
+    feast: P.has('feast') ? { id: 'lab', guests: 10, items: [1, 2], gap: [5, 8] } : undefined,
+  } });
+  const L = computeLayout(w, h, { seats: SEATS, hearthSlots: 2, cauldronSlots: 1, pantry: PANTRY });
+  const orders = [['bread_cheese'], ['ale', 'ribs'], ['hunter_stew'], ['honey_bread'], ['cheese_honey']];
+  orders.forEach((items, i) => { if (i !== 3) { s.seatGuest(i, { items }); s.takeOrder(i); } });
+  s.seats[1].guest && (s.seats[1].guest.patience *= 0.45);   // один заждался — видна мимика
+  s.putOn('hearth');
+  if (s.cookers[0].item) s.cookers[0].t = s.cookTime('hearth') * 0.7;
+  s.plate = ['bread', 'roast', 'cheese']; s.plateQ = ['ok', 'ok', 'ok'];   // как в kitchen-lab: прямо в состояние
+  s.t = EVENING * s.rules.shiftSeconds;
+  const ui = { anim: { chop: -9, flip: {}, stir: {} }, stir: null, drag: null, toast: null, born: {}, speech: {}, leaving: {}, react: {} };
+  return { s, L, ui };
+}
+
+// Где камин: повтор геометрии drawBack из hall.js (в игре её вернёт сам drawBack).
+// Если раскладку зала поменяют, здесь поправить вместе с ней.
+function fireOf(H) {
+  const S = H.stage;
+  const backH = H.guestTop - S.y, guestH = H.counter.y - H.guestTop;
+  const deep = backH > guestH * 1.2;
+  const wallBottom = deep ? S.y + backH * 0.62 : H.guestTop + guestH * 0.45;
+  const fw = Math.min(S.w * 0.34, 260), fh = Math.min((wallBottom - S.y) * 0.6, fw * 0.9);
+  return { fx: S.x + S.w * 0.62 - fw / 2, fy: wallBottom - fh, fw, fh, wallBottom, deep };
+}
+
+function render(ctx, cell, t) {
+  const { w, h, dpr, screen, lit } = cell;
+  const { s, L, ui } = build(w, h);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.globalCompositeOperation = 'source-over'; ctx.globalAlpha = 1;
+  ctx.fillStyle = '#1c120c'; ctx.fillRect(0, 0, w, h);
+  if (screen === 'hall') {
+    const H = L.hall;
+    drawHall(ctx, H, s, ui, t);
+    if (lit) {
+      ctx.save(); ctx.beginPath(); ctx.rect(H.stage.x, H.stage.y, H.stage.w, H.stage.h); ctx.clip();
+      // контактные тени под гостями у стойки — на кромке стойки под бюстом
+      s.seats.forEach((seat, i) => {
+        const P = H.seats[i];
+        if (seat.guest && P.kind === 'counter') contactShadow(ctx, P.cx, H.counter.y + H.counter.h * 0.06, 90 * P.scale, 0.9);
+      });
+      lightHall(ctx, H, s, t, fireOf(H));
+      ctx.restore();
+    }
+  } else {
+    const K = L.kitchen;
+    drawKitchen(ctx, K, s, ui, t);
+    if (lit) {
+      ctx.save(); ctx.beginPath(); ctx.rect(K.stage.x, K.stage.y, K.stage.w, K.stage.h); ctx.clip();
+      lightKitchen(ctx, K, s, t);
+      ctx.restore();
+    }
+  }
+  ctx.fillStyle = '#d8c6a4'; ctx.font = '600 14px system-ui';
+  ctx.fillText(`${screen} ${lit ? 'свет' : 'без света'} ${w}×${h} e=${EVENING}`, 8, 26);
+}
+
+const cells = [];
+const root = document.getElementById('root');
+for (const [w, h] of SIZES) for (const screen of ['hall', 'kitchen']) for (const lit of [false, true]) {
+  const fig = document.createElement('figure');
+  const cv = document.createElement('canvas'), dpr = Math.min(2, devicePixelRatio || 1);
+  cv.width = w * dpr; cv.height = h * dpr; cv.style.width = w + 'px'; cv.style.height = h + 'px';
+  fig.append(cv); root.append(fig);
+  cells.push({ ctx: cv.getContext('2d'), w, h, dpr, screen, lit });
+}
+const frozen = P.has('t') ? +P.get('t') : null;
+let fps = 0, last = 0, n = 0;
+function frame(ms) {
+  const t = frozen ?? ms / 1000;
+  for (const c of cells) render(c.ctx, c, t);
+  n++; if (ms - last > 1000) { fps = n * 1000 / (ms - last); n = 0; last = ms; window.labFps = fps; }
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+// Сколько стоит сам свет: среднее время lightHall/lightKitchen на кадр (мс), без отрисовки сцены.
+window.benchLight = (frames = 200) => {
+  const out = {};
+  for (const c of cells.filter(c => c.lit)) {
+    const { s, L } = build(c.w, c.h);
+    const K = L.kitchen, H = L.hall, F = fireOf(H);
+    const t0 = performance.now();
+    for (let k = 0; k < frames; k++) c.screen === 'hall' ? lightHall(c.ctx, H, s, k / 60, F) : lightKitchen(c.ctx, K, s, k / 60);
+    out[`${c.screen}-${c.w}x${c.h}`] = +((performance.now() - t0) / frames).toFixed(3);
+  }
+  return out;
+};
+
+window.snapAll = async (dir = 'game10-tavern/_light_shots', t = 10.3) => {
+  const out = [];
+  for (const c of cells) {
+    const cv = document.createElement('canvas'); cv.width = c.w * 2; cv.height = c.h * 2;
+    render(cv.getContext('2d'), { ...c, dpr: 2 }, t);
+    const file = `${dir}/${c.screen}-${c.lit ? 'lit' : 'flat'}-${c.w}x${c.h}-e${EVENING}.png`;
+    await fetch('/upload?file=' + encodeURIComponent(file), { method: 'POST', body: cv.toDataURL('image/png').split(',')[1] });
+    out.push(file);
+  }
+  return out;
+};
+</script>
+</body>
+</html>
