@@ -40,9 +40,9 @@ const STR = {
     bots: 'Ботов', diff: 'Боты', easy: 'Слабые', normal: 'Обычные', hard: 'Злые',
     wins: 'До побед', blood: 'Кровь', sound: 'Звук', on: 'Вкл', off: 'Выкл',
     pause: 'Пауза', resume: 'Продолжить', menu: 'В меню', again: 'Ещё матч',
-    you: 'Вы', p1: 'Игрок 1', p2: 'Игрок 2', bot: 'Бот',
-    round: 'Раунд', fight: 'В бой!', takes: 'берёт раунд', draw: 'Ничья',
-    matchWin: 'побеждает в матче!', points: 'очков', quake: 'Пещера рушится!',
+    you: 'Вы', p1: 'Игрок 1', p2: 'Игрок 2', bot: 'Бот', player: 'Игрок',
+    round: 'Раунд', fight: 'В бой!', takes: 'победил', draw: 'Ничья',
+    matchWin: 'победил в матче!', points: 'очков', quake: 'Пещера рушится!',
     tShoot: 'Выстрел', tJump: 'Прыжок', tAtk: 'Удар', tDown: 'Вниз',
     ctrlSolo: 'Ходить: стрелки или WASD. Прыжок: пробел или вверх. Удар: J. Выстрел: K. Вниз: спрыгнуть с уступа или сменить оружие. Вверх или вниз при выстреле меняют прицел.',
     ctrlDuo: 'Игрок 1: WASD, удар F, выстрел G. Игрок 2: стрелки, удар 1, выстрел 2 на цифровой клавиатуре (или , и .).',
@@ -79,8 +79,8 @@ const STR = {
     bots: 'Bots', diff: 'Bots are', easy: 'Weak', normal: 'Normal', hard: 'Mean',
     wins: 'Wins to take', blood: 'Blood', sound: 'Sound', on: 'On', off: 'Off',
     pause: 'Paused', resume: 'Resume', menu: 'Menu', again: 'Rematch',
-    you: 'You', p1: 'Player 1', p2: 'Player 2', bot: 'Bot',
-    round: 'Round', fight: 'Fight!', takes: 'takes the round', draw: 'Draw',
+    you: 'You', p1: 'Player 1', p2: 'Player 2', bot: 'Bot', player: 'Player',
+    round: 'Round', fight: 'Fight!', takes: 'wins', draw: 'Draw',
     matchWin: 'wins the match!', points: 'pts', quake: 'The cave is collapsing!',
     tShoot: 'Shoot', tJump: 'Jump', tAtk: 'Hit', tDown: 'Down',
     ctrlSolo: 'Move: arrows or WASD. Jump: space or up. Hit: J. Shoot: K. Down: drop from a ledge or swap weapon. Hold up or down while shooting to aim.',
@@ -1357,8 +1357,7 @@ function endRound() {
   YS.stop();
 }
 function nameOf(f) {
-  const who = f.ctrl === 'bot' ? `${L.bot} ${f.i + (S.mode === 'solo' ? 0 : -1)}` : S.mode === 'solo' ? L.you : f.ctrl === 'p1' ? L.p1 : L.p2;
-  return `${who} (${L.races[f.race][0]})`;
+  return `${L.player} ${f.i + 1}`;
 }
 function checkMatchEnd() {
   if (demo) { nextRound(); return; }
@@ -1679,7 +1678,7 @@ let hudCache = '';
 function buildHud() {
   if (isSurv()) {
     const f = fighters[0];
-    $('hud').innerHTML = `<div class="card" id="hc${f.i}"><div class="nm"><i style="background:${f.color}"></i><span>${L.you} (${L.races[f.race][0]})</span></div><div class="hp"><div id="hh${f.i}"></div></div><div class="ln"><span id="hw${f.i}"></span><span></span></div></div>`
+    $('hud').innerHTML = `<div class="card" id="hc${f.i}"><div class="nm"><i style="background:${f.color}"></i><span>${nameOf(f)}</span></div><div class="hp"><div id="hh${f.i}"></div></div><div class="ln"><span id="hw${f.i}"></span><span></span></div></div>`
       + `<div class="card"><div class="nm"><span>${L.wave} ${surv.wave}</span></div><div class="ln" style="margin-top:4px"><span id="svl"></span><span id="svk"></span></div></div>`;
     hudCache = ''; return;
   }
