@@ -3,14 +3,14 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
-<title>Лунные Дуэли</title>
+<title>Fairy Fighters</title>
 <!-- sdk.js: только для Яндекс Игр -->
 <style>
   html,body{margin:0;padding:0;height:100%;overflow:hidden;background:#07070c;color:#e6dfc8;
     -webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent;
     font:bold 15px/1.25 "Courier New",ui-monospace,monospace;}
   body{position:fixed;inset:0;touch-action:none;overscroll-behavior:none;}
-  canvas{position:fixed;left:0;top:0;width:100%;height:100%;image-rendering:pixelated;}
+  #c{position:fixed;left:0;top:0;width:100%;height:100%;image-rendering:pixelated;}
   .hide{display:none!important}
   .shadow{text-shadow:2px 2px 0 #000}
   /* панели в пиксельном духе: без скруглений, жёсткие тени */
@@ -18,6 +18,14 @@
     border:3px solid #3b3550;box-shadow:0 0 0 3px #000,8px 8px 0 #000;padding:16px 18px;
     width:min(460px,calc(100vw - 40px));max-height:calc(100vh - 40px);overflow:auto;box-sizing:border-box;z-index:20}
   .panel h1{margin:0 0 2px;font-size:28px;letter-spacing:1px;color:#f0d890;text-align:center}
+  /* меню поверх драки ботов: полупрозрачное и прижато вниз, сверху логотип */
+  #menu{top:auto;bottom:max(10px,2vh);transform:translateX(-50%);background:rgba(18,17,28,.86);max-height:calc(100vh - min(80vw,520px,52vh) * .4 - 34px)}
+  /* логотип ниже по высоте экрана: ширина не больше 52% высоты, иначе меню наезжает на вторую строку */
+  #logo{position:fixed;left:50%;top:max(8px,2vh);transform:translateX(-50%);z-index:19;pointer-events:none;
+    width:min(80vw,520px,52vh);height:auto;image-rendering:pixelated;animation:bob 2.4s steps(2) infinite}
+  @keyframes bob{0%,100%{transform:translate(-50%,0)}50%{transform:translate(-50%,-5px)}}
+  #menu .row{margin:5px 0}
+  #menu .btn{min-height:40px}
   .panel h2{margin:0 0 10px;font-size:20px;color:#f0d890;text-align:center}
   .sub{text-align:center;color:#a99fc0;font-size:13px;margin-bottom:12px}
   .row{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:7px 0}
@@ -57,13 +65,13 @@
 <body>
 <canvas id="c"></canvas>
 
+<canvas id="logo" class="hide" width="100" height="40" aria-label="Fairy Fighters"></canvas>
 <div id="hud"></div>
 <button id="pbtn" class="btn hide" aria-label="Пауза">II</button>
 <div id="banner" class="shadow"></div>
 <div id="roul" class="hide"></div>
 
 <div id="menu" class="panel hide">
-  <h1 class="shadow" data-i="title"></h1>
   <div class="sub" data-i="sub"></div>
   <div id="opts"></div>
   <button id="play" class="btn big" data-i="play"></button>
