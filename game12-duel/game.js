@@ -548,12 +548,19 @@ function spawnFighter(f, sp) {
     R, M: MAN.races[f.race], x: sp[0] * T, y: sp[1] * T, w: R.box[0], h: R.box[1], vx: 0, vy: 0, face: sp[0] < COLS / 2 ? 1 : -1,
     hp: R.hp, alive: true, onGround: false, coyote: 0, drop: 0, anim: 'idle', animT: 0, atk: null, combo: 0, comboT: 0,
     hurtT: 0, stun: 0, poison: 0, wpn: R.start ? { k: R.start, ammo: WEAP[R.start].ammo } : null, rcd: 0, aim: 0,
-    move: 0, press: {}, held: {}, prevHeld: {}, revived: false, reviveT: 0, deadT: 0, corpse: false, gone: false, killer: null, flash: 0,
+    move: 0, press: {}, held: {}, prevHeld: {}, revived: false, reviveT: 0, deadT: 0, corpse: false, gone: false, killer: null, flash: 0, spikeFloor: false, frozen: 0, burn: 0, poison: 0, faceT: 0,
   });
 }
 const cx = f => f.x, top = f => f.y - f.h, midY = f => f.y - f.h / 2;
 function animOf(f, n) { return f.M.anims[n] || f.M.anims.idle; }
 
+// Разворот бойца. Бот не разворачивается чаще раза в 0,3 с: иначе он мельтешит влево-вправо,
+// когда цель рядом или когда удар тянет лицом к врагу, а ноги — в другую сторону. Игрок поворачивается сразу.
+function turn(f, dir, attack) {
+  if (!dir || dir === f.face) return;
+  if (f.ctrl === "bot" && (f.faceT || 0) < (attack ? 0.15 : 0.3)) return;
+  f.face = dir; f.faceT = 0;
+}
 function setAnim(f, n) { if (f.anim !== n) { f.anim = n; f.animT = 0; } }
 
 function updFighter(f, dt) {
@@ -574,7 +581,8 @@ function updFighter(f, dt) {
   const target = move * RUN * R.spd;
   const acc = (f.onGround ? 1500 : 800) * dt;
   f.vx = f.vx < target ? Math.min(target, f.vx + acc) : Math.max(target, f.vx - acc);
-  if (move && !f.atk) f.face = move;
+  if (move && !f.atk) turn(f, move);
+  f.faceT = (f.faceT || 0) + dt;
 
   // прыжок
   if (f.press.jump && !busy && (f.onGround || f.coyote > 0)) {
@@ -727,7 +735,7 @@ function updCorpse(f, dt) {
   if (f.reviveT > 0) {
     f.reviveT -= dt;
     if (f.reviveT <= 0) {
-      f.alive = true; f.revived = true; f.corpse = false; f.hp = 25; f.anim = 'idle'; f.hurtT = 0.4; addFx('smoke', f.x, midY(f));
+      f.alive = true; f.revived = true; f.corpse = false; f.hp = 25; f.anim = 'idle'; f.hurtT = 0.4; f.spikeFloor = false; addFx('smoke', f.x, midY(f));
       for (let i = 0; i < 16; i++) spawnPart({ x: f.x + rnd(-8, 8), y: f.y - rnd(0, f.h), vx: rnd(-30, 30), vy: rnd(-90, -20), life: rnd(.4, .9), col: '#cfeee0', kind: 'mist' });
       Snd.play('metal', 0.6); Snd.fx('curse', { v: 0.5 });
     }
@@ -1152,16 +1160,24 @@ function botThink(f, dt) {
   navigate(f, gx, gy);
   // бой
   if (f.R.shot && !f.atk && Math.abs(dy) < 26 && ad > 40 && ad < 320 && los(f, foe) && Math.random() < D.shoot) {
-    f.face = sgn(dx) || f.face; f.aim = f.R.shot.grav && ad > 200 ? 1 : 0; f.press.atk = true;
+    turn(f, sgn(dx), true); f.aim = f.R.shot.grav && ad > 200 ? 1 : 0; f.press.atk = true;
   } else if (ad < reach && Math.abs(dy) < Math.max(28, f.h * 0.6)) {
-    if (Math.random() < D.agg) { f.face = sgn(dx) || f.face; ai.move = 0; f.press.atk = true; }
+    if (Math.random() < D.agg) { turn(f, sgn(dx), true); ai.move = 0; f.press.atk = true; }
   } else if (f.wpn && f.rcd <= 0 && Math.abs(dy) < 26 && ad < 340 && los(f, foe) && Math.random() < D.shoot) {
-    f.face = sgn(dx) || f.face;
+    turn(f, sgn(dx), true);
     f.aim = (f.wpn.k === 'bow' && ad > 170) ? 1 : ((f.wpn.k === 'bomb' || f.wpn.k === 'flask') && ad > 160) ? 1 : 0;
     f.press.sht = true;
   } else if (f.wpn && dy < -40 && ad < 120 && f.wpn.k !== 'bomb' && Math.random() < D.shoot * 0.5) {
-    f.face = sgn(dx) || f.face; f.aim = 1; f.press.sht = true;
+    turn(f, sgn(dx), true); f.aim = 1; f.press.sht = true;
   }
+}
+// Боты не мечутся: разворот сразу после разворота заменяем короткой паузой, и разворачиваемся
+// только при заметном отрыве цели. Без этого бот на ходу поворачивался 1–2 раза в секунду.
+function antiDither(f) {
+  const ai = f.ai;
+  if (!ai.move) return;
+  if (ai.lastDir && ai.move === -ai.lastDir && roundT - (ai.turnAt || -9) < 0.4) { ai.move = 0; return; }
+  if (ai.move !== ai.lastDir) { ai.lastDir = ai.move; ai.turnAt = roundT; }
 }
 function navigate(f, gx, gy) {
   const ai = f.ai, dyg = gy - f.y, jumpH = JUMP * f.R.jump * JUMP * f.R.jump / (2 * GRAV) - 6;
@@ -1179,11 +1195,13 @@ function navigate(f, gx, gy) {
       const inX = f.x > best.x0 - 14 && f.x < best.x1 + 14;
       if (inX) { if (f.onGround) f.press.jump = true; const mid = clamp(gx, best.x0 + 8, best.x1 - 8); ai.move = Math.abs(mid - f.x) > 6 ? sgn(mid - f.x) : 0; }
       else ai.move = sgn((f.x < best.x0 ? best.x0 + 4 : best.x1 - 4) - f.x);
+      antiDither(f);
       return;
     }
   } else if (dyg > 24 && f.onGround && onOneway(f)) { f.press.down = true; }
   ai.move = Math.abs(gx - f.x) > 10 ? sgn(gx - f.x) : 0;
   ai.cross = true;
+  antiDither(f);
 }
 
 // ─────────────────────────────────────────────────────────────── ввод
@@ -1300,7 +1318,7 @@ function nextWave(first) {
   items = []; projs = []; parts = []; clouds = []; booms = []; texts = []; splats = []; bolts = []; delayed = [];
   fighters = [pl];
   if (first) spawnFighter(pl, SPAWNS[0]);
-  else { pl.x = SPAWNS[0][0] * T; pl.y = SPAWNS[0][1] * T; pl.vx = pl.vy = 0; pl.burn = pl.poison = 0; pl.atk = null; pl.hp = Math.min(pl.R.hp, pl.hp + pl.R.hp * 0.5); }
+  else { pl.x = SPAWNS[0][0] * T; pl.y = SPAWNS[0][1] * T; pl.vx = pl.vy = 0; pl.burn = pl.poison = 0; pl.atk = null; pl.spikeFloor = false; pl.frozen = 0; pl.hp = Math.min(pl.R.hp, pl.hp + pl.R.hp * 0.5); }
   surv.toSpawn = Math.min(2 + surv.wave, 16); surv.spawnT = 1;
   for (let i = 0; i < 2; i++) spawnItem();
   itemT = 6; roundT = 0;
@@ -1556,14 +1574,19 @@ function render() {
   ctx.drawImage(buf, 0, 0, viewW, viewH, offX, offY, viewW * SC, viewH * SC);
 }
 
-function drawFighter(f) {
-  const Mr = f.M; let a = animOf(f, f.anim);
+// какой кадр какой анимации сейчас у бойца (общая для отрисовки и для снимков стенда)
+function fighterFrame(f) {
+  const Mr = f.M; let a = animOf(f, f.anim), key = f.M.anims[f.anim] ? f.anim : 'idle';
   let fr;
-  if (!f.alive) { a = Mr.anims.death; fr = f.reviveT > 0 && f.reviveT < 0.6 ? Math.floor((f.reviveT / 0.6) * a.n) : Math.min(a.n - 1, Math.floor(f.deadT * 10)); }
+  if (!f.alive) { a = Mr.anims.death; key = 'death'; fr = f.reviveT > 0 && f.reviveT < 0.6 ? Math.floor((f.reviveT / 0.6) * a.n) : Math.min(a.n - 1, Math.floor(f.deadT * 10)); }
   else if (f.atk) fr = Math.min(a.n - 1, Math.floor(f.atk.t / f.atk.dur * a.n));
   else if (f.anim === 'jump' || f.anim === 'fall') fr = Math.min(a.n - 1, Math.floor(f.animT * 8));
   else if (f.anim === 'hit') fr = Math.min(a.n - 1, Math.floor(f.animT * 14));
   else fr = Math.floor(f.animT * (f.anim === 'run' ? 12 * f.R.spd : 9)) % a.n;
+  return { a, key, fr: Math.max(0, fr) };
+}
+function drawFighter(f) {
+  const Mr = f.M; const { a, fr } = fighterFrame(f);
   const flip = f.face < 0;
   const img = flip ? a.imgL : a.img; if (!img) return;
   const sxp = flip ? (a.n - 1 - fr) * Mr.fw : fr * Mr.fw;
@@ -1796,7 +1819,7 @@ async function boot() {
 
 // отладка: __duel.sim(сек) гоняет мир без рендера, __duel.auto() отдаёт игрока боту
 window.__duel = {
-  get state() { return { state, round, fighters: fighters.map(f => ({ race: f.race, hp: Math.round(f.hp), x: Math.round(f.x), y: Math.round(f.y), alive: f.alive, score: f.score, wpn: f.wpn && f.wpn.k })) }; },
+  get state() { return { state, round, fighters: fighters.map(f => ({ race: f.race, face: f.face, anim: f.anim, hp: Math.round(f.hp), x: Math.round(f.x), y: Math.round(f.y), alive: f.alive, score: f.score, wpn: f.wpn && f.wpn.k })) }; },
   sim(sec) { for (let t = 0; t < sec; t += DT) { if (state === 'fight' || state === 'roulette' || state === 'roundEnd') sim(DT); } return this.state; },
   auto(dk) { fighters.forEach(f => { if (f.ctrl !== 'bot') { f.ctrl = 'bot'; if (dk) f.diffKey = dk; } }); },
   start(o) { Object.assign(S, o || {}); S._test = true; show('hud', true); show('logo', false); show('menu', false); startMatch(); },
@@ -1810,6 +1833,12 @@ window.__duel = {
   boom(i) { const f = fighters[i]; explode(f.x, midY(f), 46, 200, null); },
   arena(i) { const a = ARENAS[i]; buildMap(a); return { id: a.id, ts: a.ts, tileset: TILESETS[a.ts], bgs: a.bgs, fill: a.fill, crates: a.crates, chands: a.chands, lanterns: a.lanterns, spawns: a.spawns, rows: base.map(r => r.join('')) }; },
   get arenaCount() { return ARENAS.length; },
+  put(i, col, row) { const f = fighters[i]; f.x = col * T; f.y = row * T; f.vx = f.vy = 0; },
+  get spikeFlags() { return fighters.map(f => !!f.spikeFloor); },
+  // снимок для раскадровки без браузера: арена, кадры бойцов, мост, ящики, люстры, предметы
+  snapshot() { return { arena: ARENAS.indexOf(AR), rows: grid.map(r => r.join('')), crates: objs.filter(o => !o.dead).map(o => [Math.round(o.x), Math.round(o.y), o.src]),
+    chands: chands.filter(c => c.state !== 'gone').map(c => [Math.round(c.x), Math.round(c.y)]), items: items.map(i => [i.k, Math.round(i.x), Math.round(i.y)]),
+    fighters: fighters.filter(f => !f.gone).map(f => { const fr = fighterFrame(f); return { race: f.race, key: fr.key, fr: fr.fr, face: f.face, x: Math.round(f.x), y: Math.round(f.y), alive: f.alive, color: f.color, hp: Math.round(f.hp) }; }) }; },
   hurt(i, n) { fighters[i].hp -= n; },
   dropItem(k, i) { const f = fighters[i]; items.push({ k, ammo: k === 'heal' ? 0 : WEAP[k].ammo, x: f.x, y: f.y - 2, vy: 0, vx: 0, t: 0 }); },
 };
