@@ -1284,7 +1284,8 @@ const Net = {
     });
   },
   leave() {
-    if (this.role === 'guest' && this.conn) { this.send({ t: 'leave' }); }
+    // напрямую в соединение: send() на 'leave' сам зовёт leave(), иначе вышла бы бесконечная рекурсия
+    if (this.role === 'guest' && this.conn && this.conn.open) { try { this.conn.send({ t: 'leave' }); } catch (e) {} }
     const wasRacing = online && state !== 'menu';
     this.reset();
     if (!wasRacing) lobbyUi();
